@@ -1,0 +1,17 @@
+{
+  "name": "hashmonke",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": ".."
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cpptools-extension-pack",
+        "ms-vscode.cmake-tools"
+      ]
+    }
+  },
+  "remoteUser": "vscode"
+}
