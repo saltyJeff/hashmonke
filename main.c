@@ -168,8 +168,8 @@ int main(int argc, const char **argv)
 
     signal(SIGINT, sigint_handler);
 
-    struct hashmonke_runner *runner = hashmonke_runner_run_with_starting_workers(
-        manifest, file_status_callback, cli.starting_workers);
+    struct hashmonke_runner *runner = hashmonke_runner_run_with_options(
+        manifest, file_status_callback, cli.starting_workers, !cli.no_thread_warmup);
     if (!runner)
     {
         fprintf(stderr, "Error: Failed to initialize runner.\n");

@@ -84,6 +84,7 @@ struct hashmonke_runner
     pthread_t *worker_threads;
     uint32_t max_workers;
     uint32_t total_workers_spawned;
+    bool thread_warmup;
     pthread_mutex_t thread_mgmt_lock;
     pthread_mutex_t join_lock;
     bool coordinator_joined;
@@ -275,7 +276,7 @@ static void *coordinator_func(void *arg)
     for (uint32_t i = 0; i < initial_workers; ++i)
         spawn_worker(runner);
 
-    enum tuner_state state = STATE_BASELINE_W1;
+    enum tuner_state state = runner->thread_warmup ? STATE_BASELINE_W1 : STATE_LOCKED;
     double baseline_rate = 0.0;
     double b1_rate = 0.0;
     double m1_rate = 0.0;
@@ -409,8 +410,8 @@ static void *coordinator_func(void *arg)
     return NULL;
 }
 
-struct hashmonke_runner *hashmonke_runner_run_with_starting_workers(
-    struct hashmonke_file *file, hashmonke_runner_cb cb, uint32_t starting_workers)
+struct hashmonke_runner *hashmonke_runner_run_with_options(
+    struct hashmonke_file *file, hashmonke_runner_cb cb, uint32_t starting_workers, bool thread_warmup)
 {
     if (!file)
         return NULL;
@@ -421,6 +422,7 @@ struct hashmonke_runner *hashmonke_runner_run_with_starting_workers(
 
     runner->file = file;
     runner->cb = cb;
+    runner->thread_warmup = thread_warmup;
     atomic_store(&runner->min_hash_workers, UINT32_MAX);
     if (pthread_mutex_init(&runner->cb_lock, NULL) != 0)
     {
@@ -474,6 +476,12 @@ struct hashmonke_runner *hashmonke_runner_run_with_starting_workers(
     }
 
     return runner;
+}
+
+struct hashmonke_runner *hashmonke_runner_run_with_starting_workers(
+    struct hashmonke_file *file, hashmonke_runner_cb cb, uint32_t starting_workers)
+{
+    return hashmonke_runner_run_with_options(file, cb, starting_workers, true);
 }
 
 struct hashmonke_runner *hashmonke_runner_run(struct hashmonke_file *file, hashmonke_runner_cb cb)

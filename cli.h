@@ -23,6 +23,7 @@ struct hashmonke_cli
     enum hashmonke_file_format format;
     bool wait_for_input;
     bool no_tui;
+    bool no_thread_warmup;
     uint32_t starting_workers;
     const char *err_msg;
 };

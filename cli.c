@@ -14,6 +14,7 @@ void hashmonke_print_help(const char *prog_name)
     printf("  --folder <dir>        Base folder for relative paths (default: checksum file directory)\n");
     printf("  --format <fmt>        Checksum file format: auto, sfv, gnu, bsd (default: auto)\n");
     printf("  --starting-workers <n> Number of workers to start with (default: 1, max: 128)\n");
+    printf("  --no-thread-warmup    Disable dynamically adding workers during verification\n");
     printf("  --wfi, --wait-for-input  Wait for a key after showing the summary\n");
     printf("  --no-tui              Disable live status; print STATUS<TAB>FILE per entry\n");
     printf("  -h, --help            Show this help message and exit\n");
@@ -64,6 +65,10 @@ struct hashmonke_cli hashmonke_parse_cli(int argc, const char **argv)
         else if (strcmp(arg, "--no-tui") == 0)
         {
             res.no_tui = true;
+        }
+        else if (strcmp(arg, "--no-thread-warmup") == 0)
+        {
+            res.no_thread_warmup = true;
         }
         else if (strcmp(arg, "--starting-workers") == 0 || strncmp(arg, "--starting-workers=", 19) == 0)
         {

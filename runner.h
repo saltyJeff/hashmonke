@@ -33,6 +33,8 @@ typedef void (*hashmonke_runner_cb)(const char *file_abs_path, enum hashmonke_ha
 struct hashmonke_runner *hashmonke_runner_run(struct hashmonke_file *file, hashmonke_runner_cb cb);
 struct hashmonke_runner *hashmonke_runner_run_with_starting_workers(
     struct hashmonke_file *file, hashmonke_runner_cb cb, uint32_t starting_workers);
+struct hashmonke_runner *hashmonke_runner_run_with_options(
+    struct hashmonke_file *file, hashmonke_runner_cb cb, uint32_t starting_workers, bool thread_warmup);
 void hashmonke_runner_wait(struct hashmonke_runner *runner);
 void hashmonke_runner_interrupt(struct hashmonke_runner *runner);
 struct hashmonke_runner_stats hashmonke_runner_get_stats(struct hashmonke_runner *runner);

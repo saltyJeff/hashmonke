@@ -9,6 +9,7 @@ endif
 CFLAGS ?= -std=c17 -march=x86-64-v3 -Wall -Wextra -O3 -pthread -I.
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -O3 -pthread -I.
 LDFLAGS ?= -pthread
+STRIP ?= strip
 
 USE_ASM ?= 1
 TARGET_TRIPLE ?= $(shell $(CC) -dumpmachine)
@@ -43,6 +44,7 @@ all: $(BIN)
 
 $(BIN): main.o $(CORE_OBJS) $(ALGO_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(STRIP) --strip-debug $@$(if $(filter Windows_NT,$(OS)),.exe,)
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)
