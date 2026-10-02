@@ -1,6 +1,6 @@
 #include "file_internal.h"
 
-bool hashmonke_parse_bsd(const char *line, const char *base_dir, struct hashmonke_hash_tuple *tup)
+bool hashmonke_parse_bsd(const char *line, const char *base_dir, struct hashmonke_file_entry *entry)
 {
     const char *p = hashmonke_skip_left_space(line);
 
@@ -93,9 +93,10 @@ bool hashmonke_parse_bsd(const char *line, const char *base_dir, struct hashmonk
         return false;
     }
 
-    tup->hash = bytes;
-    tup->file_abs_path = abs_path;
-    tup->file_fd = hashmonke_open_entry(abs_path, true);
-    tup->algo = algo;
+    entry->hash = bytes;
+    entry->file_path = abs_path;
+    entry->text_mode = true;
+    entry->algo = algo;
     return true;
 }
+

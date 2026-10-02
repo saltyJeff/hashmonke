@@ -5,9 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 enum hashmonke_hash_code
 {
@@ -33,7 +30,3 @@ enum hashmonke_hash_code hashmonke_hasher_hash(
     enum hashmonke_algo algo, hashmonke_hash_progress_cb progress, void *user_data);
 
 size_t hashmonke_hasher_get_last_bytes(struct hashmonke_hasher *hasher);
-
-#ifdef __cplusplus
-}
-#endif

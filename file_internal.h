@@ -2,13 +2,13 @@
 
 #include "file.h"
 #include <ctype.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
 #if defined(_WIN32) || defined(__MINGW32__)
 #include <io.h>
 #else
@@ -16,10 +16,6 @@
 #endif
 #if !defined(_WIN32) && !defined(__MINGW32__)
 #include <errno.h>
-#endif
-
-#ifdef __cplusplus
-extern "C" {
 #endif
 
 static inline int hashmonke_open_entry(const char *path, bool binary_mode)
@@ -418,8 +414,8 @@ static inline char *hashmonke_resolve_entry_path(const char *base_dir, const cha
         return NULL;
 
     // Check if rel_or_abs is already absolute (drive letter 'C:' or leading '/' or '\')
-    bool is_abs = ((isalpha((unsigned char)rel_or_abs[0]) && rel_or_abs[1] == ':') ||
-                   rel_or_abs[0] == '/' || rel_or_abs[0] == '\\');
+    bool is_abs = ((isalpha((unsigned char)rel_or_abs[0]) && rel_or_abs[1] == ':') || rel_or_abs[0] == '/' ||
+                   rel_or_abs[0] == '\\');
     if (is_abs)
     {
         return hashmonke_canonical_path(rel_or_abs);
@@ -452,7 +448,6 @@ static inline char *hashmonke_resolve_entry_path(const char *base_dir, const cha
     free(combined);
     return canonical;
 }
-
 
 static inline char *hashmonke_trim_right(char *str)
 {
@@ -496,10 +491,7 @@ static inline bool hashmonke_str_ends_with_ci(const char *str, const char *suffi
     return true;
 }
 
-bool hashmonke_parse_sfv(const char *line, const char *base_dir, struct hashmonke_hash_tuple *tup);
-bool hashmonke_parse_gnu(const char *line, const char *base_dir, struct hashmonke_hash_tuple *tup);
-bool hashmonke_parse_bsd(const char *line, const char *base_dir, struct hashmonke_hash_tuple *tup);
+bool hashmonke_parse_sfv(const char *line, const char *base_dir, struct hashmonke_file_entry *entry);
+bool hashmonke_parse_gnu(const char *line, const char *base_dir, struct hashmonke_file_entry *entry);
+bool hashmonke_parse_bsd(const char *line, const char *base_dir, struct hashmonke_file_entry *entry);
 
-#ifdef __cplusplus
-}
-#endif

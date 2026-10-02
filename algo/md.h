@@ -1,10 +1,6 @@
 #pragma once
 #include <stddef.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 /** based off of openssl's EVP_MD */
 struct hashmonke_md;
 
@@ -18,7 +14,3 @@ const char *hashmonke_md_final_func(struct hashmonke_md *md);
 struct hashmonke_md *hashmonke_md_md5(void);
 struct hashmonke_md *hashmonke_md_sha1(void);
 struct hashmonke_md *hashmonke_md_crc32(void);
-
-#ifdef __cplusplus
-}
-#endif

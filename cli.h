@@ -4,10 +4,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 enum hashmonke_cli_task
 {
     HASHMONKE_CLI_VERIFY,
@@ -30,7 +26,3 @@ struct hashmonke_cli
 
 struct hashmonke_cli hashmonke_parse_cli(int argc, const char **argv);
 void hashmonke_print_help(const char *prog_name);
-
-#ifdef __cplusplus
-}
-#endif
