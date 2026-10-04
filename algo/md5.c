@@ -16,10 +16,7 @@ typedef struct md5_state_st {
 #if !defined(MD5_NO_ASM) && (defined(__x86_64__) || defined(_M_X64))
 #define MD5_ASM
 
-#if defined(_WIN32)
-__attribute__((sysv_abi))
-#endif
-void md5_block_asm_data_order(uint32_t *state, const uint8_t *data, size_t num);
+void HASHMONKE_ASM_ABI md5_block_asm_data_order(uint32_t *state, const uint8_t *data, size_t num);
 #define md5_block_data_order md5_block_asm_data_order
 
 #else // C Fallback

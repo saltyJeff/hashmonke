@@ -11,10 +11,7 @@ typedef struct
 
 #if !defined(CRC32_NO_ASM) && (defined(__x86_64__) || defined(_M_X64))
 #define CRC32_ASM
-#if defined(_WIN32)
-HASHMONKE_ASM_ABI
-#endif
-uint32_t crc32_arch_asm(uint32_t crc, const uint8_t *buf, size_t len);
+uint32_t HASHMONKE_ASM_ABI crc32_arch_asm(uint32_t crc, const uint8_t *buf, size_t len);
 #endif
 
 static const uint32_t crc32_table[256] = {

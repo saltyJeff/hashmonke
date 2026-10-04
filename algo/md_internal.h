@@ -55,7 +55,7 @@ static inline void CRYPTO_store_u32_be(void *ptr, uint32_t val) {
 }
 
 #if defined(__x86_64__) || defined(_M_X64)
-#if defined(_WIN32)
+#if defined(__MINGW32__)
 #define HASHMONKE_ASM_ABI __attribute__((sysv_abi))
 #endif
 #endif

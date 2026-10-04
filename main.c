@@ -1,4 +1,4 @@
-#ifndef _WIN32
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "cli.h"
@@ -8,17 +8,9 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <conio.h>
-#include <io.h>
-#include <windows.h>
-#else
-#include <termios.h>
 #include <time.h>
 #include <unistd.h>
-#endif
 
 static volatile sig_atomic_t g_interrupted = 0;
 
@@ -30,75 +22,29 @@ static void sigint_handler(int sig)
 
 static bool is_terminal(FILE *stream)
 {
-#ifdef _WIN32
-    return _isatty(_fileno(stream)) != 0;
-#else
     return isatty(fileno(stream)) != 0;
-#endif
 }
 
 static double monotonic_seconds(void)
 {
-#ifdef _WIN32
-    LARGE_INTEGER frequency, counter;
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&counter);
-    return (double)counter.QuadPart / (double)frequency.QuadPart;
-#else
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     return (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0;
-#endif
 }
 
 static void sleep_ms(unsigned int milliseconds)
 {
-#ifdef _WIN32
-    Sleep(milliseconds);
-#else
     struct timespec duration;
     duration.tv_sec = milliseconds / 1000;
     duration.tv_nsec = (long)(milliseconds % 1000) * 1000000L;
     nanosleep(&duration, NULL);
-#endif
 }
 
 static void wait_for_keypress(void)
 {
-    printf("Press any key to exit...");
+    printf("Press enter to exit...");
     fflush(stdout);
-#ifdef _WIN32
-    (void)_getch();
-#else
-    if (isatty(STDIN_FILENO))
-    {
-        struct termios previous, raw;
-        if (tcgetattr(STDIN_FILENO, &previous) == 0)
-        {
-            raw = previous;
-            raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
-            raw.c_cc[VMIN] = 1;
-            raw.c_cc[VTIME] = 0;
-            if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0)
-            {
-                (void)getchar();
-                (void)tcsetattr(STDIN_FILENO, TCSANOW, &previous);
-            }
-            else
-            {
-                (void)getchar();
-            }
-        }
-        else
-        {
-            (void)getchar();
-        }
-    }
-    else
-    {
-        (void)getchar();
-    }
-#endif
+    (void)getchar();
     putchar('\n');
 }
 

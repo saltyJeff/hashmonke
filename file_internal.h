@@ -9,23 +9,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(_WIN32) || defined(__MINGW32__)
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
-#if !defined(_WIN32) && !defined(__MINGW32__)
 #include <errno.h>
-#endif
+#include <unistd.h>
 
 static inline int hashmonke_open_entry(const char *path, bool binary_mode)
 {
-#if defined(_WIN32) || defined(__MINGW32__)
-    return open(path, O_RDONLY | (binary_mode ? O_BINARY : O_TEXT));
-#else
-    (void)binary_mode;
-    return open(path, O_RDONLY);
+    int flags = O_RDONLY;
+#ifdef O_BINARY
+    flags |= (binary_mode ? O_BINARY : 0);
 #endif
+    return open(path, flags);
 }
 
 /* Read one complete text line, growing the buffer as needed. Returns 1 on a
@@ -352,14 +345,15 @@ static inline char *hashmonke_canonical_path(const char *path)
 {
     if (!path)
         return NULL;
-#if defined(_WIN32) || defined(__MINGW32__)
+
+#if defined(__MINGW32__)
     return _fullpath(NULL, path, 0);
 #else
     char *res = realpath(path, NULL);
     if (!res)
     {
         // Preserve missing manifest targets while keeping the API's absolute-path contract.
-        if (path[0] == '/')
+        if (path[0] == '/' || (isalpha((unsigned char)path[0]) && path[1] == ':'))
             return strdup(path);
 
         size_t cwd_cap = 256;

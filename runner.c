@@ -1,4 +1,4 @@
-#ifndef _WIN32
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "runner.h"
@@ -9,26 +9,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-#ifdef _WIN32
-#include <windows.h>
-static uint32_t get_logical_cores(void)
-{
-    SYSTEM_INFO sysinfo;
-    GetSystemInfo(&sysinfo);
-    return (sysinfo.dwNumberOfProcessors > 0) ? (uint32_t)sysinfo.dwNumberOfProcessors : 4u;
-}
-static void runner_sleep_ms(uint32_t ms)
-{
-    Sleep(ms);
-}
-#else
 #include <unistd.h>
+
 static uint32_t get_logical_cores(void)
 {
+#if defined(_SC_NPROCESSORS_ONLN)
     long c = sysconf(_SC_NPROCESSORS_ONLN);
-    return (c > 0) ? (uint32_t)c : 4u;
+    if (c > 0)
+        return (uint32_t)c;
+#endif
+#if defined(__MINGW32__)
+    int count = pthread_num_processors_np();
+    if (count > 0)
+        return (uint32_t)count;
+#endif
+    return 4u;
 }
+
 static void runner_sleep_ms(uint32_t ms)
 {
     struct timespec duration;
@@ -36,20 +33,12 @@ static void runner_sleep_ms(uint32_t ms)
     duration.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&duration, NULL);
 }
-#endif
 
 static double runner_monotonic_seconds(void)
 {
-#ifdef _WIN32
-    LARGE_INTEGER frequency, counter;
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&counter);
-    return (double)counter.QuadPart / (double)frequency.QuadPart;
-#else
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     return (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0;
-#endif
 }
 
 #define WINDOW_DURATION_SEC 1.0
@@ -255,11 +244,8 @@ static bool spawn_worker(struct hashmonke_runner *runner)
 
 enum tuner_state
 {
-    STATE_BASELINE_W1,
-    STATE_BASELINE_W2,
     STATE_SETTLING,
-    STATE_MEASURE_W1,
-    STATE_MEASURE_W2,
+    STATE_EVALUATE,
     STATE_LOCKED
 };
 
@@ -272,10 +258,12 @@ static void *coordinator_func(void *arg)
     for (uint32_t i = 0; i < initial_workers; ++i)
         spawn_worker(runner);
 
-    enum tuner_state state = runner->thread_warmup ? STATE_BASELINE_W1 : STATE_LOCKED;
-    double baseline_rate = 0.0;
-    double b1_rate = 0.0;
-    double m1_rate = 0.0;
+    enum tuner_state state = runner->thread_warmup ? STATE_SETTLING : STATE_LOCKED;
+    int direction = +1;          // +1 = increasing workers, -1 = decreasing workers
+    uint32_t reversals = 0;       // Direction changes; capped at 3
+    double prev_rate = 0.0;
+    double best_rate = 0.0;
+    uint32_t best_workers = initial_workers;
 
     while (!atomic_load(&runner->interrupted))
     {
@@ -312,70 +300,156 @@ static void *coordinator_func(void *arg)
 
         switch (state)
         {
-        case STATE_BASELINE_W1:
-            b1_rate = current_rate;
-            state = STATE_BASELINE_W2;
-            break;
-
-        case STATE_BASELINE_W2: {
-            double b2_rate = current_rate;
-            baseline_rate = (b1_rate + b2_rate) / 2.0;
-
-            if (atomic_load(&runner->active_workers) < runner->max_workers && !atomic_load(&runner->manifest_eof))
-            {
-                atomic_fetch_add(&runner->target_workers, 1);
-                spawn_worker(runner);
-                state = STATE_SETTLING;
-            }
-            else
-            {
-                state = STATE_LOCKED;
-            }
-            break;
-        }
-
         case STATE_SETTLING:
-            // Discard settling window
-            state = STATE_MEASURE_W1;
+            // Discard transitional window after thread count changes; transition to measurement
+            state = STATE_EVALUATE;
             break;
 
-        case STATE_MEASURE_W1:
-            m1_rate = current_rate;
-            state = STATE_MEASURE_W2;
-            break;
+        case STATE_EVALUATE: {
+            uint32_t current_w = atomic_load(&runner->active_workers);
 
-        case STATE_MEASURE_W2: {
-            double m2_rate = current_rate;
-            double new_rate = (m1_rate + m2_rate) / 2.0;
-
-            bool both_dropped_5pct = (baseline_rate > 0.0) && (m1_rate < baseline_rate * 0.95) &&
-                                     (m2_rate < baseline_rate * 0.95);
-            bool improvement_under_5pct = (baseline_rate > 0.0) && (new_rate < baseline_rate * 1.05);
-
-            if (both_dropped_5pct || improvement_under_5pct)
+            // Track all-time best throughput and worker count
+            if (current_rate > best_rate)
             {
-                // Backtrack 1 worker and lock
-                uint32_t current_target = atomic_load(&runner->target_workers);
-                if (current_target > 1)
-                {
-                    atomic_store(&runner->target_workers, current_target - 1);
-                    atomic_fetch_add(&runner->retirement_requests, 1);
-                }
-                state = STATE_LOCKED;
+                best_rate = current_rate;
+                best_workers = current_w;
             }
-            else
+
+            if (prev_rate <= 0.0)
             {
-                // Improvement is >= 5%: keep worker and check if we can add more
-                baseline_rate = new_rate;
-                if (atomic_load(&runner->active_workers) < runner->max_workers && !atomic_load(&runner->manifest_eof))
+                // First valid measurement: establish baseline and try scaling up
+                prev_rate = current_rate;
+                if (current_w < runner->max_workers && !atomic_load(&runner->manifest_eof))
                 {
                     atomic_fetch_add(&runner->target_workers, 1);
                     spawn_worker(runner);
+                    direction = +1;
                     state = STATE_SETTLING;
                 }
                 else
                 {
                     state = STATE_LOCKED;
+                }
+                break;
+            }
+
+            // Decide whether to continue or reverse direction
+            if (direction == +1)
+            {
+                // We scaled up: did throughput improve by at least 5%?
+                if (current_rate >= prev_rate * 1.05)
+                {
+                    // Improved: continue climbing if headroom exists
+                    prev_rate = current_rate;
+                    if (current_w < runner->max_workers && !atomic_load(&runner->manifest_eof))
+                    {
+                        atomic_fetch_add(&runner->target_workers, 1);
+                        spawn_worker(runner);
+                        state = STATE_SETTLING;
+                    }
+                    else
+                    {
+                        state = STATE_LOCKED;
+                    }
+                }
+                else
+                {
+                    // Plateaued or regressed: reverse direction
+                    reversals++;
+                    direction = -1;
+                    prev_rate = current_rate;
+
+                    if (reversals >= 3)
+                    {
+                        // Oscillation limit reached: converge to best observed worker count
+                        if (current_w > best_workers)
+                        {
+                            atomic_store(&runner->target_workers, best_workers);
+                            atomic_fetch_add(&runner->retirement_requests, current_w - best_workers);
+                        }
+                        else if (current_w < best_workers)
+                        {
+                            uint32_t to_add = best_workers - current_w;
+                            atomic_store(&runner->target_workers, best_workers);
+                            for (uint32_t i = 0; i < to_add; ++i)
+                                spawn_worker(runner);
+                        }
+                        state = STATE_LOCKED;
+                    }
+                    else
+                    {
+                        // Step down 1 worker
+                        uint32_t cur_target = atomic_load(&runner->target_workers);
+                        if (cur_target > 1)
+                        {
+                            atomic_store(&runner->target_workers, cur_target - 1);
+                            atomic_fetch_add(&runner->retirement_requests, 1);
+                            state = STATE_SETTLING;
+                        }
+                        else
+                        {
+                            state = STATE_LOCKED;
+                        }
+                    }
+                }
+            }
+            else // direction == -1
+            {
+                // We scaled down: did throughput hold within 2% or improve?
+                if (current_rate >= prev_rate * 0.98)
+                {
+                    // Throughput held or improved with fewer threads: continue reducing
+                    prev_rate = current_rate;
+                    uint32_t cur_target = atomic_load(&runner->target_workers);
+                    if (cur_target > 1)
+                    {
+                        atomic_store(&runner->target_workers, cur_target - 1);
+                        atomic_fetch_add(&runner->retirement_requests, 1);
+                        state = STATE_SETTLING;
+                    }
+                    else
+                    {
+                        state = STATE_LOCKED;
+                    }
+                }
+                else
+                {
+                    // Throughput dropped noticeably: reversing direction back up
+                    reversals++;
+                    direction = +1;
+                    prev_rate = current_rate;
+
+                    if (reversals >= 3)
+                    {
+                        // Oscillation limit reached: converge to best observed worker count
+                        if (current_w > best_workers)
+                        {
+                            atomic_store(&runner->target_workers, best_workers);
+                            atomic_fetch_add(&runner->retirement_requests, current_w - best_workers);
+                        }
+                        else if (current_w < best_workers)
+                        {
+                            uint32_t to_add = best_workers - current_w;
+                            atomic_store(&runner->target_workers, best_workers);
+                            for (uint32_t i = 0; i < to_add; ++i)
+                                spawn_worker(runner);
+                        }
+                        state = STATE_LOCKED;
+                    }
+                    else
+                    {
+                        // Step up 1 worker
+                        if (current_w < runner->max_workers && !atomic_load(&runner->manifest_eof))
+                        {
+                            atomic_fetch_add(&runner->target_workers, 1);
+                            spawn_worker(runner);
+                            state = STATE_SETTLING;
+                        }
+                        else
+                        {
+                            state = STATE_LOCKED;
+                        }
+                    }
                 }
             }
             break;
