@@ -13,10 +13,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#ifdef _WIN32
-#include <io.h>
-#include <windows.h>
-#endif
 
 #define HASHMONKE_BUFFER_SIZE (1 * 1024 * 1024)
 
@@ -45,29 +41,17 @@ struct pipeline_ctx
     pthread_cond_t not_full;
     pthread_cond_t not_empty;
     bool io_error;
+    bool interrupted;
     size_t total_bytes;
-    struct hashmonke_hash_stats *stats;
+    struct hashmonke_hash_ctrl *ctrl;
     uint64_t start_ms;
 };
 
 static uint64_t monotonic_ms(void)
 {
-#ifdef _WIN32
-    static LARGE_INTEGER freq;
-    static bool init = false;
-    if (!init)
-    {
-        QueryPerformanceFrequency(&freq);
-        init = true;
-    }
-    LARGE_INTEGER counter;
-    QueryPerformanceCounter(&counter);
-    return (uint64_t)((counter.QuadPart * 1000) / freq.QuadPart);
-#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-#endif
 }
 
 static void *compute_worker(void *arg)
@@ -87,18 +71,25 @@ static void *compute_worker(void *arg)
         char *data = ctx->slots[slot_idx].data;
         pthread_mutex_unlock(&ctx->lock);
 
-        if (len > 0)
+        if (len > 0 && !ctx->interrupted)
         {
-            hashmonke_md_update_func(ctx->md, data, len);
-            if (ctx->stats)
+            if (ctx->ctrl && atomic_load(&ctx->ctrl->cancel))
             {
-                atomic_fetch_add(&ctx->stats->bytes_hashed, len);
-                uint64_t now = monotonic_ms();
-                atomic_store(&ctx->stats->ms_elapsed, (size_t)(now >= ctx->start_ms ? now - ctx->start_ms : 0));
+                ctx->interrupted = true;
+            }
+            else
+            {
+                hashmonke_md_update_func(ctx->md, data, len);
+                if (ctx->ctrl)
+                {
+                    atomic_fetch_add(&ctx->ctrl->bytes_hashed, len);
+                    uint64_t now = monotonic_ms();
+                    atomic_store(&ctx->ctrl->ms_elapsed, (size_t)(now >= ctx->start_ms ? now - ctx->start_ms : 0));
+                }
             }
         }
 
-        if (is_err)
+        if (is_err || ctx->interrupted)
             break;
 
         pthread_mutex_lock(&ctx->lock);
@@ -160,7 +151,7 @@ static struct hashmonke_md *create_md(enum hashmonke_algo algo)
 
 enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, const char *file_path, bool text_mode,
                                                const struct hashmonke_hash *expected,
-                                               struct hashmonke_hash_stats *stats)
+                                               struct hashmonke_hash_ctrl *ctrl)
 {
     if (!hasher || !file_path)
         return HASHMONKE_HASH_INTERNAL_ERR;
@@ -168,11 +159,14 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
     if (!expected)
         return HASHMONKE_HASH_INTERNAL_ERR;
 
+    if (ctrl && atomic_load(&ctrl->cancel))
+        return HASHMONKE_HASH_INTERRUPTED;
+
     int flags = O_RDONLY;
-#ifdef _WIN32
-    flags |= (text_mode ? _O_TEXT : _O_BINARY);
-#else
-    (void)text_mode;
+#ifdef O_BINARY
+    flags |= (text_mode ? 0 : O_BINARY);
+#elif defined(_O_BINARY)
+    flags |= (text_mode ? 0 : _O_BINARY);
 #endif
 
     int fd = open(file_path, flags);
@@ -181,24 +175,16 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
 
     uint64_t start_ms = monotonic_ms();
 
-    if (stats)
+    if (ctrl)
     {
-        stats->file_path = file_path;
-        atomic_store(&stats->bytes_hashed, 0);
-        atomic_store(&stats->ms_elapsed, 0);
-#ifdef _WIN32
-        struct _stat64 st;
-        if (_fstat64(fd, &st) == 0 && (st.st_mode & _S_IFREG))
-            atomic_store(&stats->bytes_total, (size_t)st.st_size);
-        else
-            atomic_store(&stats->bytes_total, 0);
-#else
+        ctrl->file_path = file_path;
+        atomic_store(&ctrl->bytes_hashed, 0);
+        atomic_store(&ctrl->ms_elapsed, 0);
         struct stat st;
         if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode))
-            atomic_store(&stats->bytes_total, (size_t)st.st_size);
+            atomic_store(&ctrl->bytes_total, (size_t)st.st_size);
         else
-            atomic_store(&stats->bytes_total, 0);
-#endif
+            atomic_store(&ctrl->bytes_total, 0);
     }
 
 #if defined(POSIX_FADV_SEQUENTIAL)
@@ -223,7 +209,8 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
     ctx.count = 0;
     ctx.total_bytes = 0;
     ctx.io_error = false;
-    ctx.stats = stats;
+    ctx.interrupted = false;
+    ctx.ctrl = ctrl;
     ctx.start_ms = start_ms;
 
     if (pthread_mutex_init(&ctx.lock, NULL) != 0)
@@ -265,6 +252,12 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
 
     while (true)
     {
+        if (ctrl && atomic_load(&ctrl->cancel))
+        {
+            ctx.interrupted = true;
+            break;
+        }
+
         pthread_mutex_lock(&ctx.lock);
         while (ctx.count == 2)
         {
@@ -273,6 +266,12 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
         int slot_idx = ctx.write_idx;
         pthread_mutex_unlock(&ctx.lock);
 
+        if (ctrl && atomic_load(&ctrl->cancel))
+        {
+            ctx.interrupted = true;
+            break;
+        }
+
         size_t n = 0;
         bool is_eof = false;
         bool is_err = false;
@@ -280,6 +279,12 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
         // Read directly into the pipeline buffer; short reads are not EOF.
         while (n < HASHMONKE_BUFFER_SIZE)
         {
+            if (ctrl && atomic_load(&ctrl->cancel))
+            {
+                ctx.interrupted = true;
+                break;
+            }
+
             ssize_t bytes = read(ctx.fd, ctx.slots[slot_idx].data + n,
                                  HASHMONKE_BUFFER_SIZE - n);
             if (bytes > 0)
@@ -299,6 +304,11 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
             }
         }
 
+        if (ctx.interrupted)
+        {
+            break;
+        }
+
         pthread_mutex_lock(&ctx.lock);
         ctx.slots[slot_idx].len = n;
         ctx.slots[slot_idx].is_eof = is_eof;
@@ -315,6 +325,20 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
         }
     }
 
+    // Wake up compute worker if interrupted
+    if (ctx.interrupted)
+    {
+        pthread_mutex_lock(&ctx.lock);
+        int slot_idx = ctx.write_idx;
+        ctx.slots[slot_idx].len = 0;
+        ctx.slots[slot_idx].is_eof = true;
+        ctx.slots[slot_idx].is_err = false;
+        ctx.write_idx = (ctx.write_idx + 1) % 2;
+        ctx.count++;
+        pthread_cond_signal(&ctx.not_empty);
+        pthread_mutex_unlock(&ctx.lock);
+    }
+
     pthread_join(worker, NULL);
     close(fd);
     pthread_mutex_destroy(&ctx.lock);
@@ -324,10 +348,17 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
     size_t digest_size = hashmonke_md_digest_size(md);
     const uint8_t *computed = hashmonke_md_final_func(md);
 
-    if (stats)
+    if (ctrl)
     {
         uint64_t now = monotonic_ms();
-        atomic_store(&stats->ms_elapsed, (size_t)(now >= start_ms ? now - start_ms : 0));
+        atomic_store(&ctrl->ms_elapsed, (size_t)(now >= start_ms ? now - start_ms : 0));
+    }
+
+    if (ctx.interrupted)
+    {
+        if (computed)
+            free((void *)computed);
+        return HASHMONKE_HASH_INTERRUPTED;
     }
 
     if (ctx.io_error)
@@ -345,3 +376,4 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
 
     return matched ? HASHMONKE_HASH_MATCHES : HASHMONKE_HASH_MISMATCH;
 }
+

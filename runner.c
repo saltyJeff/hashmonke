@@ -163,20 +163,27 @@ static void *worker_func(void *arg)
             memcpy(expected->value, entry->hash, (size_t)sz);
         }
 
-        struct hashmonke_hash_stats stats;
-        memset(&stats, 0, sizeof(stats));
+        struct hashmonke_hash_ctrl ctrl;
+        memset(&ctrl, 0, sizeof(ctrl));
+        atomic_store(&ctrl.cancel, atomic_load(&runner->interrupted));
 
         uint32_t hashing_workers = atomic_fetch_add(&runner->current_hash_workers, 1) + 1;
         record_hash_worker_count(runner, hashing_workers);
 
         enum hashmonke_hash_code hcode = hashmonke_hasher_hash(
-            hasher, entry->file_path, entry->text_mode, expected, &stats);
+            hasher, entry->file_path, entry->text_mode, expected, &ctrl);
 
         uint32_t remaining_hash_workers = atomic_fetch_sub(&runner->current_hash_workers, 1) - 1;
         if (remaining_hash_workers > 0)
             record_hash_worker_count(runner, remaining_hash_workers);
 
-        atomic_fetch_add(&runner->total_bytes_hashed, atomic_load(&stats.bytes_hashed));
+        atomic_fetch_add(&runner->total_bytes_hashed, atomic_load(&ctrl.bytes_hashed));
+
+        if (hcode == HASHMONKE_HASH_INTERRUPTED)
+        {
+            break;
+        }
+
         atomic_fetch_add(&runner->total_files_processed, 1);
 
         if (hcode == HASHMONKE_HASH_INTERNAL_ERR)

@@ -25,7 +25,7 @@ static size_t test_digest_size(enum hashmonke_algo algo)
 static enum hashmonke_hash_code hash_test_file(
     struct hashmonke_hasher *hasher, const char *path, const uint8_t *expected,
     enum hashmonke_algo algo, bool text_mode = false,
-    struct hashmonke_hash_stats *out_stats = nullptr)
+    struct hashmonke_hash_ctrl *out_stats = nullptr)
 {
     size_t digest_size = test_digest_size(algo);
     std::vector<uint8_t> buf(sizeof(struct hashmonke_hash) + digest_size);
@@ -36,7 +36,7 @@ static enum hashmonke_hash_code hash_test_file(
         memcpy(h->value, expected, digest_size);
     }
 
-    struct hashmonke_hash_stats stats;
+    struct hashmonke_hash_ctrl stats;
     memset(&stats, 0, sizeof(stats));
 
     enum hashmonke_hash_code code = hashmonke_hasher_hash(
@@ -81,7 +81,7 @@ TEST_CASE("Hasher: Exact Match and Mismatch for MD5, SHA1, SFV")
 
     // MD5 exact match
     std::vector<uint8_t> md5_expected = from_hex("900150983cd24fb0d6963f7d28e17f72");
-    struct hashmonke_hash_stats stats;
+    struct hashmonke_hash_ctrl stats;
     enum hashmonke_hash_code code =
         hash_test_file(hasher, test_file.c_str(), md5_expected.data(), HASHMONKE_ALGO_MD5, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
@@ -120,7 +120,7 @@ TEST_CASE("Hasher: Missing file returns IO error")
 
     create_test_file("test_before_missing.tmp", "abc");
     std::vector<uint8_t> expected = from_hex("900150983cd24fb0d6963f7d28e17f72");
-    struct hashmonke_hash_stats stats;
+    struct hashmonke_hash_ctrl stats;
     CHECK_EQ(hash_test_file(hasher, "test_before_missing.tmp", expected.data(),
                             HASHMONKE_ALGO_MD5, false, &stats), HASHMONKE_HASH_MATCHES);
     CHECK_EQ(stats.bytes_hashed, 3u);
@@ -146,7 +146,7 @@ TEST_CASE("Hasher: Empty file (0 bytes)")
     std::string empty_file = "test_empty.tmp";
     create_test_file(empty_file, "");
 
-    struct hashmonke_hash_stats stats;
+    struct hashmonke_hash_ctrl stats;
     std::vector<uint8_t> md5_empty = from_hex("d41d8cd98f00b204e9800998ecf8427e");
     enum hashmonke_hash_code code =
         hash_test_file(hasher, empty_file.c_str(), md5_empty.data(), HASHMONKE_ALGO_MD5, false, &stats);
@@ -188,7 +188,7 @@ TEST_CASE("Hasher: File larger than buffer size through pipeline")
     const uint8_t *md5_ref = hashmonke_md_final_func(md5_md);
 
     // Verify through pipeline
-    struct hashmonke_hash_stats stats;
+    struct hashmonke_hash_ctrl stats;
     enum hashmonke_hash_code code =
         hash_test_file(hasher, large_file.c_str(), sfv_ref, HASHMONKE_ALGO_SFV, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
@@ -222,7 +222,7 @@ TEST_CASE("Hasher: Binary data at pipeline buffer boundaries")
         const std::string content = data.substr(0, size);
         create_test_file(path, content);
         auto expected = from_hex(hash_string(hashmonke_md_sha1(), content));
-        struct hashmonke_hash_stats stats;
+        struct hashmonke_hash_ctrl stats;
         CHECK_EQ(hash_test_file(hasher, path.c_str(), expected.data(), HASHMONKE_ALGO_SHA1,
                                 false, &stats), HASHMONKE_HASH_MATCHES);
         CHECK_EQ(stats.bytes_hashed, size);
@@ -247,7 +247,7 @@ TEST_CASE("Hasher: Text mode translation vs binary mode")
     std::string expected_content = "line1\r\nline2\r\n";
 #endif
     auto expected_text = from_hex(hash_string(hashmonke_md_md5(), expected_content));
-    struct hashmonke_hash_stats stats;
+    struct hashmonke_hash_ctrl stats;
     CHECK_EQ(hash_test_file(hasher, path.c_str(), expected_text.data(), HASHMONKE_ALGO_MD5, true, &stats),
              HASHMONKE_HASH_MATCHES);
     CHECK_EQ(stats.bytes_hashed, expected_content.size());
@@ -297,7 +297,7 @@ TEST_CASE("Hasher: Short reads from a sequential stream")
         close(fd);
     });
 
-    struct hashmonke_hash_stats stats;
+    struct hashmonke_hash_ctrl stats;
     auto code = hash_test_file(hasher, path.c_str(), expected.data(), HASHMONKE_ALGO_SHA1, false, &stats);
     writer.join();
     CHECK(write_ok);

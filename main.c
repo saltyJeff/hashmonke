@@ -132,6 +132,9 @@ static void file_status_callback(const char *file_path, enum hashmonke_hash_code
     case HASHMONKE_HASH_INTERNAL_ERR:
         status_str = "ERROR";
         break;
+    case HASHMONKE_HASH_INTERRUPTED:
+        status_str = "CANCELLED";
+        break;
     }
 
     if (g_no_tui)
