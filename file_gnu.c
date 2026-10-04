@@ -42,21 +42,27 @@ bool hashmonke_parse_gnu(const char *line, const char *base_dir, struct hashmonk
         return false;
     hashmonke_strip_quotes(unescaped);
 
+    char *disp_path = strdup(unescaped);
     char *abs_path = hashmonke_resolve_entry_path(base_dir, unescaped);
     free(unescaped);
     if (!abs_path)
+    {
+        free(disp_path);
         return false;
+    }
 
     size_t out_len = 0;
     uint8_t *bytes = hashmonke_hex_to_bytes(hex_start, hex_len, &out_len);
     if (!bytes)
     {
         free(abs_path);
+        free(disp_path);
         return false;
     }
 
     entry->hash = bytes;
     entry->file_path = abs_path;
+    entry->display_path = disp_path;
     entry->text_mode = !binary_mode;
     entry->algo = algo;
     return true;

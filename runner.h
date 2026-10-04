@@ -19,6 +19,8 @@ struct hashmonke_runner_stats
     uint32_t files_malformed;
     uint32_t total_files_processed;
     double current_throughput_mb_s;
+    double min_throughput_mb_s;
+    double max_throughput_mb_s;
     bool is_finished;
     bool has_error;
 };
@@ -27,11 +29,40 @@ struct hashmonke_runner;
 
 typedef void (*hashmonke_runner_cb)(const char *file_abs_path, enum hashmonke_hash_code code);
 
+enum hashmonke_runner_event_type
+{
+    HASHMONKE_RUNNER_EVENT_START,
+    HASHMONKE_RUNNER_EVENT_PROGRESS,
+    HASHMONKE_RUNNER_EVENT_COMPLETE,
+};
+
+struct hashmonke_runner_event
+{
+    enum hashmonke_runner_event_type type;
+    size_t line_number;
+    size_t entry_index;
+    const char *file_path;
+    const char *display_path;
+    enum hashmonke_hash_code status;
+    uint64_t bytes_processed;
+    uint64_t file_size;
+    double throughput_mb_s;
+};
+
+struct hashmonke_runner_event_context;
+
+typedef void (*hashmonke_runner_event_cb)(const struct hashmonke_runner_event *event,
+                                          struct hashmonke_runner_event_context *context);
+
 struct hashmonke_runner *hashmonke_runner_run(struct hashmonke_file *file, hashmonke_runner_cb cb);
 struct hashmonke_runner *hashmonke_runner_run_with_starting_workers(struct hashmonke_file *file, hashmonke_runner_cb cb,
                                                                     uint32_t starting_workers);
 struct hashmonke_runner *hashmonke_runner_run_with_options(struct hashmonke_file *file, hashmonke_runner_cb cb,
                                                            uint32_t starting_workers, bool thread_warmup);
+struct hashmonke_runner *hashmonke_runner_run_with_events(struct hashmonke_file *file, hashmonke_runner_cb cb,
+                                                          hashmonke_runner_event_cb event_cb,
+                                                          struct hashmonke_runner_event_context *event_ctx,
+                                                          uint32_t starting_workers, bool thread_warmup);
 void hashmonke_runner_wait(struct hashmonke_runner *runner);
 void hashmonke_runner_interrupt(struct hashmonke_runner *runner);
 struct hashmonke_runner_stats hashmonke_runner_get_stats(struct hashmonke_runner *runner);

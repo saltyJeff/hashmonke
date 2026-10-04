@@ -23,16 +23,32 @@ struct hashmonke_hasher;
 struct hashmonke_hasher *hashmonke_hasher_create(void);
 void hashmonke_hasher_free(struct hashmonke_hasher *hasher);
 
+struct hashmonke_hasher_progress_event
+{
+    const char *file_path;
+    uint64_t bytes_hashed;
+    uint64_t bytes_total;
+};
+
+struct hashmonke_hasher_progress_context;
+
+typedef void (*hashmonke_hasher_progress_cb)(const struct hashmonke_hasher_progress_event *event,
+                                             struct hashmonke_hasher_progress_context *context);
+
 struct hashmonke_hash_ctrl
 {
     /* Controls */
     _Atomic bool cancel;
 
     /* Stats / observation */
-    _Atomic size_t bytes_hashed;
-    _Atomic size_t bytes_total;
-    _Atomic size_t ms_elapsed;
+    _Atomic uint64_t bytes_hashed;
+    _Atomic uint64_t bytes_total;
+    _Atomic uint64_t ms_elapsed;
     const char *file_path;
+
+    /* Progress reporting */
+    hashmonke_hasher_progress_cb progress_cb;
+    struct hashmonke_hasher_progress_context *progress_context;
 };
 
 /** Hash a file at the given path.

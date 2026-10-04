@@ -1,3 +1,6 @@
+#ifndef _FILE_OFFSET_BITS
+#define _FILE_OFFSET_BITS 64
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -85,6 +88,14 @@ static void *compute_worker(void *arg)
                     atomic_fetch_add(&ctx->ctrl->bytes_hashed, len);
                     uint64_t now = monotonic_ms();
                     atomic_store(&ctx->ctrl->ms_elapsed, (size_t)(now >= ctx->start_ms ? now - ctx->start_ms : 0));
+                    if (ctx->ctrl->progress_cb)
+                    {
+                        struct hashmonke_hasher_progress_event pe;
+                        pe.file_path = ctx->ctrl->file_path;
+                        pe.bytes_hashed = atomic_load(&ctx->ctrl->bytes_hashed);
+                        pe.bytes_total = atomic_load(&ctx->ctrl->bytes_total);
+                        ctx->ctrl->progress_cb(&pe, ctx->ctrl->progress_context);
+                    }
                 }
             }
         }
@@ -182,9 +193,18 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
         atomic_store(&ctrl->ms_elapsed, 0);
         struct stat st;
         if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode))
-            atomic_store(&ctrl->bytes_total, (size_t)st.st_size);
+            atomic_store(&ctrl->bytes_total, (uint64_t)st.st_size);
         else
             atomic_store(&ctrl->bytes_total, 0);
+
+        if (ctrl->progress_cb)
+        {
+            struct hashmonke_hasher_progress_event pe;
+            pe.file_path = file_path;
+            pe.bytes_hashed = 0;
+            pe.bytes_total = atomic_load(&ctrl->bytes_total);
+            ctrl->progress_cb(&pe, ctrl->progress_context);
+        }
     }
 
 #if defined(POSIX_FADV_SEQUENTIAL)

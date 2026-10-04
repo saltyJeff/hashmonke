@@ -5,6 +5,7 @@
 #include "file.h"
 #include "hash.h"
 #include "runner.h"
+#include "tui_render.h"
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -55,7 +56,6 @@ static void file_status_callback(const char *file_path, enum hashmonke_hash_code
 {
     if (g_is_tty)
     {
-        // Clear current live status line on stderr
         fprintf(stderr, "\r\33[2K");
         fflush(stderr);
     }
@@ -112,10 +112,27 @@ int main(int argc, const char **argv)
         return 2;
     }
 
-    g_no_tui = cli.no_tui;
-    g_is_tty = !g_no_tui && is_terminal(stderr) && is_terminal(stdout);
-
     signal(SIGINT, sigint_handler);
+
+    const char *slash = strrchr(cli.hash_file, '/');
+    const char *backslash = strrchr(cli.hash_file, '\\');
+    const char *sep = slash;
+    if (!sep || (backslash && backslash > sep))
+        sep = backslash;
+    const char *manifest_title = sep ? sep + 1 : cli.hash_file;
+
+    bool interactive_tty = is_terminal(stdout) && is_terminal(stderr);
+
+    // Interactive TUI run
+    if (!cli.no_tui && interactive_tty)
+    {
+        return tui_render_run(manifest, manifest_title, cli.starting_workers,
+                              !cli.no_thread_warmup, cli.wait_for_input, &g_interrupted);
+    }
+
+    // Non-TUI / piped run
+    g_no_tui = cli.no_tui;
+    g_is_tty = !g_no_tui && interactive_tty;
 
     struct hashmonke_runner *runner = hashmonke_runner_run_with_options(
         manifest, file_status_callback, cli.starting_workers, !cli.no_thread_warmup);
@@ -128,14 +145,11 @@ int main(int argc, const char **argv)
 
     double start_time = monotonic_seconds();
 
-    // Main loop: poll stats and print live status to stderr if interactive TTY
     while (true)
     {
         struct hashmonke_runner_stats stats = hashmonke_runner_get_stats(runner);
         if (stats.is_finished || g_interrupted)
-        {
             break;
-        }
 
         if (g_is_tty)
         {
@@ -148,7 +162,6 @@ int main(int argc, const char **argv)
                     stats.current_throughput_mb_s);
             fflush(stderr);
         }
-
         sleep_ms(100);
     }
 
@@ -215,3 +228,4 @@ int main(int argc, const char **argv)
 
     return exit_code;
 }
+

@@ -22,11 +22,13 @@ enum hashmonke_entry_code
 struct hashmonke_file_entry
 {
     const char *file_path;
+    const char *display_path;
     // Hash bytes converted from ASCII; size is determined by algo.
     uint8_t *hash;
     enum hashmonke_algo algo;
     enum hashmonke_entry_code code;
     bool text_mode;
+    size_t line_number;
 };
 
 struct hashmonke_file
@@ -35,6 +37,22 @@ struct hashmonke_file
     enum hashmonke_file_format format;
     size_t num_entries;
     struct hashmonke_file_entry *entries;
+};
+
+struct hashmonke_file_list_entry
+{
+    size_t line_number;
+    const char *file_path;
+    const char *display_path;
+    enum hashmonke_algo algo;
+    enum hashmonke_entry_code code;
+    bool text_mode;
+};
+
+struct hashmonke_file_list
+{
+    size_t num_entries;
+    struct hashmonke_file_list_entry *entries;
 };
 
 /**
@@ -48,3 +66,10 @@ struct hashmonke_file *hashmonke_file_init(const char *folder_path, const char *
  * Frees a hashmonke file and its entries
  */
 void hashmonke_file_free(struct hashmonke_file *file);
+
+/**
+ * Scans a manifest once to collect entry names without opening any referenced files.
+ */
+struct hashmonke_file_list *hashmonke_file_list(const char *folder_path, const char *file_path,
+                                                enum hashmonke_file_format format);
+void hashmonke_file_list_free(struct hashmonke_file_list *list);

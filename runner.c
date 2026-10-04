@@ -50,6 +50,10 @@ struct hashmonke_runner
     hashmonke_runner_cb cb;
     pthread_mutex_t cb_lock;
 
+    hashmonke_runner_event_cb event_cb;
+    struct hashmonke_runner_event_context *event_ctx;
+    pthread_mutex_t event_lock;
+
     _Atomic size_t next_entry_idx;
     _Atomic uint64_t total_bytes_hashed;
     _Atomic uint32_t active_workers;
@@ -69,6 +73,8 @@ struct hashmonke_runner
     _Atomic uint32_t retirement_requests;
 
     _Atomic double current_throughput_mb_s;
+    _Atomic double min_throughput_mb_s;
+    _Atomic double max_throughput_mb_s;
 
     pthread_t coordinator_thread;
     pthread_t *worker_threads;
@@ -93,6 +99,46 @@ static void record_hash_worker_count(struct hashmonke_runner *runner, uint32_t c
            !atomic_compare_exchange_weak(&runner->min_hash_workers, &observed, count))
     {
     }
+}
+
+struct runner_hasher_worker_ctx
+{
+    struct hashmonke_runner *runner;
+    size_t line_number;
+    size_t entry_index;
+    const char *file_path;
+    const char *display_path;
+    double start_time;
+};
+
+static void runner_hasher_progress_callback(
+    const struct hashmonke_hasher_progress_event *pe,
+    struct hashmonke_hasher_progress_context *ctx)
+{
+    struct runner_hasher_worker_ctx *wctx = (struct runner_hasher_worker_ctx *)ctx;
+    if (!wctx || !wctx->runner || !wctx->runner->event_cb)
+        return;
+
+    double now = runner_monotonic_seconds();
+    double elapsed = now - wctx->start_time;
+    double mb_s = 0.0;
+    if (elapsed > 0.0)
+        mb_s = ((double)pe->bytes_hashed / (1024.0 * 1024.0)) / elapsed;
+
+    struct hashmonke_runner_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = HASHMONKE_RUNNER_EVENT_PROGRESS;
+    ev.line_number = wctx->line_number;
+    ev.entry_index = wctx->entry_index;
+    ev.file_path = wctx->file_path;
+    ev.display_path = wctx->display_path;
+    ev.bytes_processed = pe->bytes_hashed;
+    ev.file_size = pe->bytes_total;
+    ev.throughput_mb_s = mb_s;
+
+    pthread_mutex_lock(&wctx->runner->event_lock);
+    wctx->runner->event_cb(&ev, wctx->runner->event_ctx);
+    pthread_mutex_unlock(&wctx->runner->event_lock);
 }
 
 static void *worker_func(void *arg)
@@ -133,13 +179,54 @@ static void *worker_func(void *arg)
             atomic_fetch_add(&runner->files_malformed, 1);
             atomic_fetch_add(&runner->total_files_processed, 1);
 
+            const char *path = entry->file_path ? entry->file_path : "<malformed>";
+            const char *disp = entry->display_path ? entry->display_path : "<malformed>";
+
+            if (runner->event_cb)
+            {
+                struct hashmonke_runner_event ev;
+                memset(&ev, 0, sizeof(ev));
+                ev.type = HASHMONKE_RUNNER_EVENT_START;
+                ev.line_number = entry->line_number;
+                ev.entry_index = entry_idx;
+                ev.file_path = path;
+                ev.display_path = disp;
+                ev.status = HASHMONKE_HASH_MALFORMED;
+                pthread_mutex_lock(&runner->event_lock);
+                runner->event_cb(&ev, runner->event_ctx);
+                pthread_mutex_unlock(&runner->event_lock);
+
+                ev.type = HASHMONKE_RUNNER_EVENT_COMPLETE;
+                pthread_mutex_lock(&runner->event_lock);
+                runner->event_cb(&ev, runner->event_ctx);
+                pthread_mutex_unlock(&runner->event_lock);
+            }
+
             if (runner->cb)
             {
                 pthread_mutex_lock(&runner->cb_lock);
-                runner->cb(entry->file_path ? entry->file_path : "<malformed>", HASHMONKE_HASH_MALFORMED);
+                runner->cb(path, HASHMONKE_HASH_MALFORMED);
                 pthread_mutex_unlock(&runner->cb_lock);
             }
             continue;
+        }
+
+        const char *path = entry->file_path;
+        const char *disp = entry->display_path ? entry->display_path : entry->file_path;
+        double file_start_time = runner_monotonic_seconds();
+
+        if (runner->event_cb)
+        {
+            struct hashmonke_runner_event ev;
+            memset(&ev, 0, sizeof(ev));
+            ev.type = HASHMONKE_RUNNER_EVENT_START;
+            ev.line_number = entry->line_number;
+            ev.entry_index = entry_idx;
+            ev.file_path = path;
+            ev.display_path = disp;
+            pthread_mutex_lock(&runner->event_lock);
+            runner->event_cb(&ev, runner->event_ctx);
+            pthread_mutex_unlock(&runner->event_lock);
         }
 
         // HASHMONKE_ENTRY_OK: Execute verification
@@ -152,9 +239,22 @@ static void *worker_func(void *arg)
             memcpy(expected->value, entry->hash, (size_t)sz);
         }
 
+        struct runner_hasher_worker_ctx wctx;
+        wctx.runner = runner;
+        wctx.line_number = entry->line_number;
+        wctx.entry_index = entry_idx;
+        wctx.file_path = path;
+        wctx.display_path = disp;
+        wctx.start_time = file_start_time;
+
         struct hashmonke_hash_ctrl ctrl;
         memset(&ctrl, 0, sizeof(ctrl));
         atomic_store(&ctrl.cancel, atomic_load(&runner->interrupted));
+        if (runner->event_cb)
+        {
+            ctrl.progress_cb = runner_hasher_progress_callback;
+            ctrl.progress_context = (struct hashmonke_hasher_progress_context *)&wctx;
+        }
 
         uint32_t hashing_workers = atomic_fetch_add(&runner->current_hash_workers, 1) + 1;
         record_hash_worker_count(runner, hashing_workers);
@@ -174,6 +274,30 @@ static void *worker_func(void *arg)
         }
 
         atomic_fetch_add(&runner->total_files_processed, 1);
+
+        if (runner->event_cb)
+        {
+            double now = runner_monotonic_seconds();
+            double elapsed = now - file_start_time;
+            uint64_t b_done = atomic_load(&ctrl.bytes_hashed);
+            double mb_s = (elapsed > 0.0) ? ((double)b_done / (1024.0 * 1024.0)) / elapsed : 0.0;
+
+            struct hashmonke_runner_event ev;
+            memset(&ev, 0, sizeof(ev));
+            ev.type = HASHMONKE_RUNNER_EVENT_COMPLETE;
+            ev.line_number = entry->line_number;
+            ev.entry_index = entry_idx;
+            ev.file_path = path;
+            ev.display_path = disp;
+            ev.status = hcode;
+            ev.bytes_processed = b_done;
+            ev.file_size = atomic_load(&ctrl.bytes_total);
+            ev.throughput_mb_s = mb_s;
+
+            pthread_mutex_lock(&runner->event_lock);
+            runner->event_cb(&ev, runner->event_ctx);
+            pthread_mutex_unlock(&runner->event_lock);
+        }
 
         if (hcode == HASHMONKE_HASH_INTERNAL_ERR)
         {
@@ -292,6 +416,19 @@ static void *coordinator_func(void *arg)
         double current_rate = (elapsed_sec > 0.0) ? ((double)window_bytes / elapsed_sec) : 0.0;
         double throughput_mb_s = current_rate / (1024.0 * 1024.0);
         atomic_store(&runner->current_throughput_mb_s, throughput_mb_s);
+        if (throughput_mb_s > 0.0)
+        {
+            double cur_min = atomic_load(&runner->min_throughput_mb_s);
+            while ((cur_min <= 0.0 || throughput_mb_s < cur_min) &&
+                   !atomic_compare_exchange_weak(&runner->min_throughput_mb_s, &cur_min, throughput_mb_s))
+            {
+            }
+            double cur_max = atomic_load(&runner->max_throughput_mb_s);
+            while (throughput_mb_s > cur_max &&
+                   !atomic_compare_exchange_weak(&runner->max_throughput_mb_s, &cur_max, throughput_mb_s))
+            {
+            }
+        }
 
         if (atomic_load(&runner->manifest_eof) || atomic_load(&runner->interrupted))
         {
@@ -480,8 +617,10 @@ static void *coordinator_func(void *arg)
     return NULL;
 }
 
-struct hashmonke_runner *hashmonke_runner_run_with_options(
-    struct hashmonke_file *file, hashmonke_runner_cb cb, uint32_t starting_workers, bool thread_warmup)
+struct hashmonke_runner *hashmonke_runner_run_with_events(
+    struct hashmonke_file *file, hashmonke_runner_cb cb,
+    hashmonke_runner_event_cb event_cb, struct hashmonke_runner_event_context *event_ctx,
+    uint32_t starting_workers, bool thread_warmup)
 {
     if (!file)
         return NULL;
@@ -492,6 +631,8 @@ struct hashmonke_runner *hashmonke_runner_run_with_options(
 
     runner->file = file;
     runner->cb = cb;
+    runner->event_cb = event_cb;
+    runner->event_ctx = event_ctx;
     runner->thread_warmup = thread_warmup;
     atomic_store(&runner->min_hash_workers, UINT32_MAX);
     if (pthread_mutex_init(&runner->cb_lock, NULL) != 0)
@@ -499,8 +640,15 @@ struct hashmonke_runner *hashmonke_runner_run_with_options(
         free(runner);
         return NULL;
     }
+    if (pthread_mutex_init(&runner->event_lock, NULL) != 0)
+    {
+        pthread_mutex_destroy(&runner->cb_lock);
+        free(runner);
+        return NULL;
+    }
     if (pthread_mutex_init(&runner->thread_mgmt_lock, NULL) != 0)
     {
+        pthread_mutex_destroy(&runner->event_lock);
         pthread_mutex_destroy(&runner->cb_lock);
         free(runner);
         return NULL;
@@ -508,6 +656,7 @@ struct hashmonke_runner *hashmonke_runner_run_with_options(
     if (pthread_mutex_init(&runner->join_lock, NULL) != 0)
     {
         pthread_mutex_destroy(&runner->thread_mgmt_lock);
+        pthread_mutex_destroy(&runner->event_lock);
         pthread_mutex_destroy(&runner->cb_lock);
         free(runner);
         return NULL;
@@ -530,6 +679,7 @@ struct hashmonke_runner *hashmonke_runner_run_with_options(
     {
         pthread_mutex_destroy(&runner->join_lock);
         pthread_mutex_destroy(&runner->thread_mgmt_lock);
+        pthread_mutex_destroy(&runner->event_lock);
         pthread_mutex_destroy(&runner->cb_lock);
         free(runner);
         return NULL;
@@ -540,12 +690,19 @@ struct hashmonke_runner *hashmonke_runner_run_with_options(
         free(runner->worker_threads);
         pthread_mutex_destroy(&runner->join_lock);
         pthread_mutex_destroy(&runner->thread_mgmt_lock);
+        pthread_mutex_destroy(&runner->event_lock);
         pthread_mutex_destroy(&runner->cb_lock);
         free(runner);
         return NULL;
     }
 
     return runner;
+}
+
+struct hashmonke_runner *hashmonke_runner_run_with_options(
+    struct hashmonke_file *file, hashmonke_runner_cb cb, uint32_t starting_workers, bool thread_warmup)
+{
+    return hashmonke_runner_run_with_events(file, cb, NULL, NULL, starting_workers, thread_warmup);
 }
 
 struct hashmonke_runner *hashmonke_runner_run_with_starting_workers(
@@ -594,6 +751,8 @@ struct hashmonke_runner_stats hashmonke_runner_get_stats(struct hashmonke_runner
     stats.files_malformed = atomic_load(&runner->files_malformed);
     stats.total_files_processed = atomic_load(&runner->total_files_processed);
     stats.current_throughput_mb_s = atomic_load(&runner->current_throughput_mb_s);
+    stats.min_throughput_mb_s = atomic_load(&runner->min_throughput_mb_s);
+    stats.max_throughput_mb_s = atomic_load(&runner->max_throughput_mb_s);
     stats.is_finished = atomic_load(&runner->is_finished);
     stats.has_error = atomic_load(&runner->fatal_error);
     return stats;
@@ -607,6 +766,7 @@ void hashmonke_runner_free(struct hashmonke_runner *runner)
     hashmonke_runner_wait(runner);
 
     pthread_mutex_destroy(&runner->cb_lock);
+    pthread_mutex_destroy(&runner->event_lock);
     pthread_mutex_destroy(&runner->thread_mgmt_lock);
     pthread_mutex_destroy(&runner->join_lock);
     free(runner->worker_threads);
