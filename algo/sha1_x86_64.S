@@ -7,6 +7,11 @@
 .globl	sha1_block_asm_data_order
 .align	16
 sha1_block_asm_data_order:
+	pushq	%rdi
+	pushq	%rsi
+	movq	%rcx,%rdi
+	movq	%rdx,%rsi
+	movq	%r8,%rdx
 	movq	%rsp,%rax
 	pushq	%rbx
 	pushq	%rbp
@@ -1219,6 +1224,8 @@ sha1_block_asm_data_order:
 	movq	-16(%rsi),%rbp
 	movq	-8(%rsi),%rbx
 	leaq	(%rsi),%rsp
+	popq	%rsi
+	popq	%rdi
 .Lepilogue:
 	.byte	0xf3,0xc3
 

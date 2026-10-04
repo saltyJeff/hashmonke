@@ -1,10 +1,10 @@
 # hashmonke
-A hashing APE
+A high-performance file hash verification tool for Windows.
 
 Hashmonke is a terminal UI tool for verifying file hashes.
 
 Some file sharers distribute archives that include the MD5/SHA of the files inside.
-Non-technical users appreciate having a GUI tool that can test and identify which files fail to match their provided hash.
+Non-technical users appreciate having a tool that can test and identify which files fail to match their provided hash.
 Many file sharers still rely on [QuickSFV](https://www.quicksfv.org/), which is Windows XP era software.
 
 Hashmonke aims to replace QuickSFV for the above usecase. Goals:
@@ -12,7 +12,7 @@ Hashmonke aims to replace QuickSFV for the above usecase. Goals:
 - higher performance
 - hardware maximization
 - user friendliness
-- portability
+- modern Windows integration
 
 ## Features
 
@@ -30,8 +30,22 @@ Hashmonke aims to replace QuickSFV for the above usecase. Goals:
 - SHA1
 
 ## Technical Details
-Hashmonke is an [actually portable executable (APE)](https://justine.lol/ape.html). It should run on a variety of OS/CPUs, making it suitable for distribution inside a file archive.
+Hashmonke is built for 64-bit Windows, targeting the modern `x86-64-v2` microarchitecture level.
 
-For hashing, we use files adapted from [AWS-LC](https://github.com/aws/aws-lc), which includes assembly level optimizations for common hashing functions. To maximize the hardware ability, Hashmonke adds threads one at a time until the total hash rate ceases to increase
+For hashing, we use algorithms adapted from [AWS-LC](https://github.com/aws/aws-lc) with assembly-level optimizations for common hashing functions. To maximize hardware utilization, Hashmonke dynamically scales worker threads to optimize hashing throughput.
 
-TUI provided by [termbox2](https://github.com/termbox/termbox2). A TUI is preferred for a small cross platform GUI interface.
+TUI is rendered using the Windows Console API.
+
+## Building
+
+Requires CMake and Visual Studio (MSVC) with C/C++ tools.
+
+```pwsh
+cmake -B build
+cmake --build build --config Release
+```
+
+Run tests:
+```pwsh
+ctest --test-dir build -C Release --output-on-failure
+```

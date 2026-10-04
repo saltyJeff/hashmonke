@@ -2,6 +2,7 @@
 
 #include "file.h"
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -9,16 +10,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <unistd.h>
+
+#include <io.h>
+#ifndef strncasecmp
+#define strncasecmp _strnicmp
+#endif
+#ifndef strcasecmp
+#define strcasecmp _stricmp
+#endif
+#ifndef strdup
+#define strdup _strdup
+#endif
 
 static inline int hashmonke_open_entry(const char *path, bool binary_mode)
 {
     int flags = O_RDONLY;
-#ifdef O_BINARY
-    flags |= (binary_mode ? O_BINARY : 0);
+#ifdef _O_BINARY
+    flags |= (binary_mode ? _O_BINARY : 0);
 #endif
-    return open(path, flags);
+    return _open(path, flags);
 }
 
 /* Read one complete text line, growing the buffer as needed. Returns 1 on a
@@ -345,61 +355,7 @@ static inline char *hashmonke_canonical_path(const char *path)
 {
     if (!path)
         return NULL;
-
-#if defined(__MINGW32__)
     return _fullpath(NULL, path, 0);
-#else
-    char *res = realpath(path, NULL);
-    if (!res)
-    {
-        // Preserve missing manifest targets while keeping the API's absolute-path contract.
-        if (path[0] == '/' || (isalpha((unsigned char)path[0]) && path[1] == ':'))
-            return strdup(path);
-
-        size_t cwd_cap = 256;
-        char *cwd = NULL;
-        bool got_cwd = false;
-        while (cwd_cap <= SIZE_MAX / 2)
-        {
-            char *next = (char *)realloc(cwd, cwd_cap);
-            if (!next)
-            {
-                free(cwd);
-                return NULL;
-            }
-            cwd = next;
-            if (getcwd(cwd, cwd_cap))
-            {
-                got_cwd = true;
-                break;
-            }
-            if (errno != ERANGE)
-            {
-                free(cwd);
-                return NULL;
-            }
-            cwd_cap *= 2;
-        }
-        if (!got_cwd)
-        {
-            free(cwd);
-            return NULL;
-        }
-        size_t cwd_len = strlen(cwd);
-        size_t path_len = strlen(path);
-        if (path_len > SIZE_MAX - 2 || cwd_len > SIZE_MAX - path_len - 2)
-        {
-            free(cwd);
-            return NULL;
-        }
-        char *absolute = (char *)malloc(cwd_len + path_len + 2);
-        if (absolute)
-            snprintf(absolute, cwd_len + path_len + 2, "%s/%s", cwd, path);
-        free(cwd);
-        return absolute;
-    }
-    return res;
-#endif
 }
 
 static inline char *hashmonke_resolve_entry_path(const char *base_dir, const char *rel_or_abs)
@@ -488,4 +444,3 @@ static inline bool hashmonke_str_ends_with_ci(const char *str, const char *suffi
 bool hashmonke_parse_sfv(const char *line, const char *base_dir, struct hashmonke_file_entry *entry);
 bool hashmonke_parse_gnu(const char *line, const char *base_dir, struct hashmonke_file_entry *entry);
 bool hashmonke_parse_bsd(const char *line, const char *base_dir, struct hashmonke_file_entry *entry);
-

@@ -3,9 +3,12 @@
 #include "algo/md.h"
 #include "file.h"
 #include "hash.h"
-#include <stdatomic.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifndef __cplusplus
+#include <stdatomic.h>
+#endif
 
 enum hashmonke_hash_code
 {
@@ -38,12 +41,21 @@ typedef void (*hashmonke_hasher_progress_cb)(const struct hashmonke_hasher_progr
 struct hashmonke_hash_ctrl
 {
     /* Controls */
+#ifdef __cplusplus
+    volatile bool cancel;
+
+    /* Stats / observation */
+    volatile uint64_t bytes_hashed;
+    volatile uint64_t bytes_total;
+    volatile uint64_t ms_elapsed;
+#else
     _Atomic bool cancel;
 
     /* Stats / observation */
     _Atomic uint64_t bytes_hashed;
     _Atomic uint64_t bytes_total;
     _Atomic uint64_t ms_elapsed;
+#endif
     const char *file_path;
 
     /* Progress reporting */

@@ -7,6 +7,11 @@
 
 .globl	md5_block_asm_data_order
 md5_block_asm_data_order:
+	pushq	%rdi
+	pushq	%rsi
+	movq	%rcx,%rdi
+	movq	%rdx,%rsi
+	movq	%r8,%rdx
 	pushq	%rbp
 	pushq	%rbx
 	pushq	%r12
@@ -666,6 +671,8 @@ md5_block_asm_data_order:
 	movq	24(%rsp),%rbx
 	movq	32(%rsp),%rbp
 	addq	$40,%rsp
+	popq	%rsi
+	popq	%rdi
 .Lepilogue:
 	.byte	0xf3,0xc3
 

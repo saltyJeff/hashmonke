@@ -1,21 +1,11 @@
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
-
 #include "tui.h"
 
+#include <conio.h>
+#include <io.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-
-#if defined(_WIN32)
-#include <conio.h>
 #include <windows.h>
-#else
-#include <sys/ioctl.h>
-#include <termios.h>
-#endif
 
 struct tui
 {
@@ -26,16 +16,12 @@ struct tui
     int cols;
     int line_chars;
     bool active;
-#if defined(_WIN32)
     HANDLE h_stdout;
     HANDLE h_stdin;
     DWORD orig_out_mode;
     DWORD orig_in_mode;
     UINT orig_cp;
     UINT orig_in_cp;
-#else
-    struct termios orig_termios;
-#endif
 };
 
 static void tui_buf_append(struct tui *tui, const char *str, size_t len)
@@ -66,21 +52,12 @@ void tui_get_size(struct tui *tui, int *rows, int *cols)
     int r = 24;
     int c = 80;
 
-#if defined(_WIN32)
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     if (GetConsoleScreenBufferInfo(tui->h_stdout, &csbi))
     {
         c = csbi.srWindow.Right - csbi.srWindow.Left + 1;
         r = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
     }
-#else
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0)
-    {
-        c = ws.ws_col;
-        r = ws.ws_row;
-    }
-#endif
 
     if (r < 10)
         r = 10;
@@ -98,7 +75,7 @@ void tui_get_size(struct tui *tui, int *rows, int *cols)
 
 struct tui *tui_init(void)
 {
-    if (!isatty(fileno(stdout)))
+    if (!_isatty(_fileno(stdout)))
         return NULL;
 
     struct tui *tui = (struct tui *)calloc(1, sizeof(struct tui));
@@ -113,7 +90,6 @@ struct tui *tui_init(void)
         return NULL;
     }
 
-#if defined(_WIN32)
     tui->h_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
     tui->h_stdin = GetStdHandle(STD_INPUT_HANDLE);
 
@@ -131,23 +107,12 @@ struct tui *tui_init(void)
 
     DWORD in_mode = ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_WINDOW_INPUT;
     SetConsoleMode(tui->h_stdin, in_mode);
-#else
-    if (tcgetattr(STDIN_FILENO, &tui->orig_termios) == 0)
-    {
-        struct termios raw = tui->orig_termios;
-        raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-        raw.c_iflag &= ~(IXON | ICRNL);
-        raw.c_cc[VMIN] = 0;
-        raw.c_cc[VTIME] = 0;
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
-    }
-#endif
 
     tui->active = true;
 
     // Enter alternate screen, hide cursor, enable mouse reporting
     const char *setup_seq = "\033[?1049h\033[?25l\033[?1000h\033[?1006h\033[2J\033[H";
-    (void)write(fileno(stdout), setup_seq, strlen(setup_seq));
+    (void)_write(_fileno(stdout), setup_seq, (unsigned int)strlen(setup_seq));
     fflush(stdout);
 
     tui_get_size(tui, &tui->rows, &tui->cols);
@@ -163,17 +128,13 @@ void tui_shutdown(struct tui *tui)
     {
         // Disable mouse tracking, restore cursor, exit alternate screen
         const char *teardown_seq = "\033[?1000l\033[?1006l\033[?25h\033[?1049l";
-        (void)write(fileno(stdout), teardown_seq, strlen(teardown_seq));
+        (void)_write(_fileno(stdout), teardown_seq, (unsigned int)strlen(teardown_seq));
         fflush(stdout);
 
-#if defined(_WIN32)
         SetConsoleOutputCP(tui->orig_cp);
         SetConsoleCP(tui->orig_in_cp);
         SetConsoleMode(tui->h_stdout, tui->orig_out_mode);
         SetConsoleMode(tui->h_stdin, tui->orig_in_mode);
-#else
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &tui->orig_termios);
-#endif
         tui->active = false;
     }
 
@@ -195,7 +156,7 @@ void tui_end_frame(struct tui *tui)
     if (!tui || !tui->buf)
         return;
     tui_buf_str(tui, "\033[J");
-    (void)write(fileno(stdout), tui->buf, tui->buf_len);
+    (void)_write(_fileno(stdout), tui->buf, (unsigned int)tui->buf_len);
     fflush(stdout);
 }
 
@@ -418,7 +379,6 @@ enum tui_key tui_poll_key(struct tui *tui)
 {
     (void)tui;
 
-#if defined(_WIN32)
     if (_kbhit())
     {
         int c = _getch();
@@ -468,24 +428,5 @@ enum tui_key tui_poll_key(struct tui *tui)
         return TUI_KEY_OTHER;
     }
     return TUI_KEY_NONE;
-#else
-    unsigned char buf[64];
-    ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
-    if (n <= 0)
-        return TUI_KEY_NONE;
-
-    if (buf[0] == 27)
-    {
-        if (n == 1)
-            return TUI_KEY_QUIT;
-        return parse_ansi_sequence(buf, (size_t)n);
-    }
-    if (buf[0] == '\r' || buf[0] == '\n')
-        return TUI_KEY_ENTER;
-    if (buf[0] == 'q' || buf[0] == 'Q' || buf[0] == 3)
-        return TUI_KEY_QUIT;
-
-    return TUI_KEY_OTHER;
-#endif
 }
 

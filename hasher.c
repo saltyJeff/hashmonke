@@ -1,21 +1,13 @@
-#ifndef _FILE_OFFSET_BITS
-#define _FILE_OFFSET_BITS 64
-#endif
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
-
 #include "hasher.h"
 #include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
+#include <io.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <time.h>
-#include <unistd.h>
+#include <windows.h>
 
 #define HASHMONKE_BUFFER_SIZE (1 * 1024 * 1024)
 
@@ -40,9 +32,9 @@ struct pipeline_ctx
     int write_idx;
     int read_idx;
     int count;
-    pthread_mutex_t lock;
-    pthread_cond_t not_full;
-    pthread_cond_t not_empty;
+    CRITICAL_SECTION lock;
+    CONDITION_VARIABLE not_full;
+    CONDITION_VARIABLE not_empty;
     bool io_error;
     bool interrupted;
     size_t total_bytes;
@@ -52,27 +44,34 @@ struct pipeline_ctx
 
 static uint64_t monotonic_ms(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+    static LARGE_INTEGER freq;
+    static int init = 0;
+    if (!init)
+    {
+        QueryPerformanceFrequency(&freq);
+        init = 1;
+    }
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return (uint64_t)((counter.QuadPart * 1000) / freq.QuadPart);
 }
 
-static void *compute_worker(void *arg)
+static DWORD WINAPI compute_worker(LPVOID arg)
 {
     struct pipeline_ctx *ctx = (struct pipeline_ctx *)arg;
     while (true)
     {
-        pthread_mutex_lock(&ctx->lock);
+        EnterCriticalSection(&ctx->lock);
         while (ctx->count == 0)
         {
-            pthread_cond_wait(&ctx->not_empty, &ctx->lock);
+            SleepConditionVariableCS(&ctx->not_empty, &ctx->lock, INFINITE);
         }
         int slot_idx = ctx->read_idx;
         size_t len = ctx->slots[slot_idx].len;
         bool is_eof = ctx->slots[slot_idx].is_eof;
         bool is_err = ctx->slots[slot_idx].is_err;
         char *data = ctx->slots[slot_idx].data;
-        pthread_mutex_unlock(&ctx->lock);
+        LeaveCriticalSection(&ctx->lock);
 
         if (len > 0 && !ctx->interrupted)
         {
@@ -103,18 +102,18 @@ static void *compute_worker(void *arg)
         if (is_err || ctx->interrupted)
             break;
 
-        pthread_mutex_lock(&ctx->lock);
+        EnterCriticalSection(&ctx->lock);
         ctx->read_idx = (ctx->read_idx + 1) % 2;
         ctx->count--;
-        pthread_cond_signal(&ctx->not_full);
-        pthread_mutex_unlock(&ctx->lock);
+        WakeConditionVariable(&ctx->not_full);
+        LeaveCriticalSection(&ctx->lock);
 
         if (is_eof)
         {
             break;
         }
     }
-    return NULL;
+    return 0;
 }
 
 struct hashmonke_hasher *hashmonke_hasher_create(void)
@@ -174,13 +173,13 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
         return HASHMONKE_HASH_INTERRUPTED;
 
     int flags = O_RDONLY;
-#ifdef O_BINARY
-    flags |= (text_mode ? 0 : O_BINARY);
-#elif defined(_O_BINARY)
+#ifdef _O_BINARY
     flags |= (text_mode ? 0 : _O_BINARY);
+#elif defined(O_BINARY)
+    flags |= (text_mode ? 0 : O_BINARY);
 #endif
 
-    int fd = open(file_path, flags);
+    int fd = _open(file_path, flags);
     if (fd < 0)
         return HASHMONKE_HASH_IO_ERR;
 
@@ -191,8 +190,8 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
         ctrl->file_path = file_path;
         atomic_store(&ctrl->bytes_hashed, 0);
         atomic_store(&ctrl->ms_elapsed, 0);
-        struct stat st;
-        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode))
+        struct _stat64 st;
+        if (_fstat64(fd, &st) == 0 && (st.st_mode & _S_IFREG))
             atomic_store(&ctrl->bytes_total, (uint64_t)st.st_size);
         else
             atomic_store(&ctrl->bytes_total, 0);
@@ -207,15 +206,10 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
         }
     }
 
-#if defined(POSIX_FADV_SEQUENTIAL)
-    // Advisory only: unsupported filesystems/streams must still be hashable.
-    (void)posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
-#endif
-
     struct hashmonke_md *md = create_md(expected->algo);
     if (!md)
     {
-        close(fd);
+        _close(fd);
         return HASHMONKE_HASH_INTERNAL_ERR;
     }
 
@@ -233,40 +227,17 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
     ctx.ctrl = ctrl;
     ctx.start_ms = start_ms;
 
-    if (pthread_mutex_init(&ctx.lock, NULL) != 0)
-    {
-        close(fd);
-        const uint8_t *digest = hashmonke_md_final_func(md);
-        free((void *)digest);
-        return HASHMONKE_HASH_INTERNAL_ERR;
-    }
-    if (pthread_cond_init(&ctx.not_full, NULL) != 0)
-    {
-        close(fd);
-        pthread_mutex_destroy(&ctx.lock);
-        const uint8_t *digest = hashmonke_md_final_func(md);
-        free((void *)digest);
-        return HASHMONKE_HASH_INTERNAL_ERR;
-    }
-    if (pthread_cond_init(&ctx.not_empty, NULL) != 0)
-    {
-        close(fd);
-        pthread_cond_destroy(&ctx.not_full);
-        pthread_mutex_destroy(&ctx.lock);
-        const uint8_t *digest = hashmonke_md_final_func(md);
-        free((void *)digest);
-        return HASHMONKE_HASH_INTERNAL_ERR;
-    }
+    InitializeCriticalSection(&ctx.lock);
+    InitializeConditionVariable(&ctx.not_full);
+    InitializeConditionVariable(&ctx.not_empty);
 
-    pthread_t worker;
-    if (pthread_create(&worker, NULL, compute_worker, &ctx) != 0)
+    HANDLE worker = CreateThread(NULL, 0, compute_worker, &ctx, 0, NULL);
+    if (!worker)
     {
-        close(fd);
+        _close(fd);
         const uint8_t *d = hashmonke_md_final_func(md);
         free((void *)d);
-        pthread_mutex_destroy(&ctx.lock);
-        pthread_cond_destroy(&ctx.not_full);
-        pthread_cond_destroy(&ctx.not_empty);
+        DeleteCriticalSection(&ctx.lock);
         return HASHMONKE_HASH_INTERNAL_ERR;
     }
 
@@ -278,13 +249,13 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
             break;
         }
 
-        pthread_mutex_lock(&ctx.lock);
+        EnterCriticalSection(&ctx.lock);
         while (ctx.count == 2)
         {
-            pthread_cond_wait(&ctx.not_full, &ctx.lock);
+            SleepConditionVariableCS(&ctx.not_full, &ctx.lock, INFINITE);
         }
         int slot_idx = ctx.write_idx;
-        pthread_mutex_unlock(&ctx.lock);
+        LeaveCriticalSection(&ctx.lock);
 
         if (ctrl && atomic_load(&ctrl->cancel))
         {
@@ -305,8 +276,8 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
                 break;
             }
 
-            ssize_t bytes = read(ctx.fd, ctx.slots[slot_idx].data + n,
-                                 HASHMONKE_BUFFER_SIZE - n);
+            int bytes = _read(ctx.fd, ctx.slots[slot_idx].data + n,
+                              (unsigned int)(HASHMONKE_BUFFER_SIZE - n));
             if (bytes > 0)
             {
                 n += (size_t)bytes;
@@ -329,15 +300,15 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
             break;
         }
 
-        pthread_mutex_lock(&ctx.lock);
+        EnterCriticalSection(&ctx.lock);
         ctx.slots[slot_idx].len = n;
         ctx.slots[slot_idx].is_eof = is_eof;
         ctx.slots[slot_idx].is_err = is_err;
         ctx.total_bytes += n;
         ctx.write_idx = (ctx.write_idx + 1) % 2;
         ctx.count++;
-        pthread_cond_signal(&ctx.not_empty);
-        pthread_mutex_unlock(&ctx.lock);
+        WakeConditionVariable(&ctx.not_empty);
+        LeaveCriticalSection(&ctx.lock);
 
         if (is_eof || is_err)
         {
@@ -348,22 +319,21 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
     // Wake up compute worker if interrupted
     if (ctx.interrupted)
     {
-        pthread_mutex_lock(&ctx.lock);
+        EnterCriticalSection(&ctx.lock);
         int slot_idx = ctx.write_idx;
         ctx.slots[slot_idx].len = 0;
         ctx.slots[slot_idx].is_eof = true;
         ctx.slots[slot_idx].is_err = false;
         ctx.write_idx = (ctx.write_idx + 1) % 2;
         ctx.count++;
-        pthread_cond_signal(&ctx.not_empty);
-        pthread_mutex_unlock(&ctx.lock);
+        WakeConditionVariable(&ctx.not_empty);
+        LeaveCriticalSection(&ctx.lock);
     }
 
-    pthread_join(worker, NULL);
-    close(fd);
-    pthread_mutex_destroy(&ctx.lock);
-    pthread_cond_destroy(&ctx.not_full);
-    pthread_cond_destroy(&ctx.not_empty);
+    WaitForSingleObject(worker, INFINITE);
+    CloseHandle(worker);
+    _close(fd);
+    DeleteCriticalSection(&ctx.lock);
 
     size_t digest_size = hashmonke_md_digest_size(md);
     const uint8_t *computed = hashmonke_md_final_func(md);

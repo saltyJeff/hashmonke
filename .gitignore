@@ -43,6 +43,8 @@
 build/
 Build/
 build-*/
+.vs/
+CMakeUserPresets.json
 
 # Temporary files
 *.tmp

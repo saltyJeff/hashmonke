@@ -9,13 +9,7 @@ extern "C" {
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
-#include <cerrno>
-#include <fcntl>
-#include <sys/stat.h>
-#include <thread>
-#include <unistd.h>
-#endif
+
 
 static size_t test_digest_size(enum hashmonke_algo algo)
 {
@@ -241,11 +235,7 @@ TEST_CASE("Hasher: Text mode translation vs binary mode")
     const std::string path = "test_text_mode.tmp";
     create_test_file(path, "line1\r\nline2\r\n");
 
-#ifdef _WIN32
     std::string expected_content = "line1\nline2\n";
-#else
-    std::string expected_content = "line1\r\nline2\r\n";
-#endif
     auto expected_text = from_hex(hash_string(hashmonke_md_md5(), expected_content));
     struct hashmonke_hash_ctrl stats;
     CHECK_EQ(hash_test_file(hasher, path.c_str(), expected_text.data(), HASHMONKE_ALGO_MD5, true, &stats),
@@ -261,50 +251,3 @@ TEST_CASE("Hasher: Text mode translation vs binary mode")
     hashmonke_hasher_free(hasher);
     std::remove(path.c_str());
 }
-
-#ifndef _WIN32
-TEST_CASE("Hasher: Short reads from a sequential stream")
-{
-    char directory[] = "/tmp/hashmonke-short-XXXXXX";
-    REQUIRE(mkdtemp(directory) != nullptr);
-    const std::string path = std::string(directory) + "/input.fifo";
-    REQUIRE(mkfifo(path.c_str(), 0600) == 0);
-    struct hashmonke_hasher *hasher = hashmonke_hasher_create();
-    REQUIRE(hasher != nullptr);
-    const std::string data(1 * 1024 * 1024 + 123, 'S');
-    auto expected = from_hex(hash_string(hashmonke_md_sha1(), data));
-    bool write_ok = true;
-    std::thread writer([&] {
-        int fd = open(path.c_str(), O_WRONLY);
-        if (fd < 0)
-        {
-            write_ok = false;
-            return;
-        }
-        size_t offset = 0;
-        while (offset < data.size())
-        {
-            ssize_t bytes = write(fd, data.data() + offset,
-                                  std::min(size_t(1021), data.size() - offset));
-            if (bytes > 0)
-                offset += static_cast<size_t>(bytes);
-            else if (bytes == 0 || errno != EINTR)
-            {
-                write_ok = false;
-                break;
-            }
-        }
-        close(fd);
-    });
-
-    struct hashmonke_hash_ctrl stats;
-    auto code = hash_test_file(hasher, path.c_str(), expected.data(), HASHMONKE_ALGO_SHA1, false, &stats);
-    writer.join();
-    CHECK(write_ok);
-    CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
-    CHECK_EQ(stats.bytes_hashed, data.size());
-    hashmonke_hasher_free(hasher);
-    std::remove(path.c_str());
-    rmdir(directory);
-}
-#endif

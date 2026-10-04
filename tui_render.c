@@ -1,14 +1,10 @@
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
-
 #include "tui_render.h"
 
-#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+#include <windows.h>
 
 enum tui_row_status
 {
@@ -33,7 +29,7 @@ struct tui_file_row_state
 
 struct tui_render_state
 {
-    pthread_mutex_t lock;
+    CRITICAL_SECTION lock;
     struct tui_file_row_state *rows;
     size_t num_rows;
     const char *manifest_title;
@@ -62,11 +58,7 @@ struct tui_render_state *tui_render_state_create(const struct hashmonke_file *ma
     if (!state)
         return NULL;
 
-    if (pthread_mutex_init(&state->lock, NULL) != 0)
-    {
-        free(state);
-        return NULL;
-    }
+    InitializeCriticalSection(&state->lock);
 
     state->manifest_title = manifest_title ? manifest_title : "manifest";
     state->num_rows = manifest->num_entries;
@@ -77,7 +69,7 @@ struct tui_render_state *tui_render_state_create(const struct hashmonke_file *ma
         state->rows = (struct tui_file_row_state *)calloc(state->num_rows, sizeof(struct tui_file_row_state));
         if (!state->rows)
         {
-            pthread_mutex_destroy(&state->lock);
+            DeleteCriticalSection(&state->lock);
             free(state);
             return NULL;
         }
@@ -98,7 +90,7 @@ void tui_render_state_free(struct tui_render_state *state)
 {
     if (!state)
         return;
-    pthread_mutex_destroy(&state->lock);
+    DeleteCriticalSection(&state->lock);
     free(state->rows);
     free(state);
 }
@@ -110,7 +102,7 @@ void tui_render_event_callback(const struct hashmonke_runner_event *event,
     if (!state || event->entry_index >= state->num_rows)
         return;
 
-    pthread_mutex_lock(&state->lock);
+    EnterCriticalSection(&state->lock);
     struct tui_file_row_state *r = &state->rows[event->entry_index];
     if (event->type == HASHMONKE_RUNNER_EVENT_START)
     {
@@ -150,7 +142,7 @@ void tui_render_event_callback(const struct hashmonke_runner_event *event,
         r->file_size = event->file_size;
         r->throughput_mb_s = event->throughput_mb_s;
     }
-    pthread_mutex_unlock(&state->lock);
+    LeaveCriticalSection(&state->lock);
 }
 
 bool tui_render_handle_key(struct tui *tui, struct tui_render_state *state,
@@ -287,7 +279,7 @@ void tui_render_frame(struct tui *tui, struct tui_render_state *state,
     if (state->scroll_top < 0)
         state->scroll_top = 0;
 
-    pthread_mutex_lock(&state->lock);
+    EnterCriticalSection(&state->lock);
     size_t end_idx = (size_t)(state->scroll_top + visible_rows);
     if (end_idx > state->num_rows)
         end_idx = state->num_rows;
@@ -351,24 +343,28 @@ void tui_render_frame(struct tui *tui, struct tui_render_state *state,
 
         tui_file_row(tui, marker, style, r->display_path, right_stats);
     }
-    pthread_mutex_unlock(&state->lock);
+    LeaveCriticalSection(&state->lock);
 
     tui_end_frame(tui);
 }
 
 static void render_sleep_ms(unsigned int ms)
 {
-    struct timespec duration;
-    duration.tv_sec = ms / 1000;
-    duration.tv_nsec = (long)(ms % 1000) * 1000000L;
-    nanosleep(&duration, NULL);
+    Sleep(ms);
 }
 
 static double render_monotonic_seconds(void)
 {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0;
+    static LARGE_INTEGER freq;
+    static int init = 0;
+    if (!init)
+    {
+        QueryPerformanceFrequency(&freq);
+        init = 1;
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (double)now.QuadPart / (double)freq.QuadPart;
 }
 
 int tui_render_run(struct hashmonke_file *manifest, const char *manifest_title,

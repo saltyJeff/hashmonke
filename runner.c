@@ -1,44 +1,35 @@
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
 #include "runner.h"
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
+#include <windows.h>
 
 static uint32_t get_logical_cores(void)
 {
-#if defined(_SC_NPROCESSORS_ONLN)
-    long c = sysconf(_SC_NPROCESSORS_ONLN);
-    if (c > 0)
-        return (uint32_t)c;
-#endif
-#if defined(__MINGW32__)
-    int count = pthread_num_processors_np();
-    if (count > 0)
-        return (uint32_t)count;
-#endif
-    return 4u;
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwNumberOfProcessors > 0 ? (uint32_t)si.dwNumberOfProcessors : 4u;
 }
 
 static void runner_sleep_ms(uint32_t ms)
 {
-    struct timespec duration;
-    duration.tv_sec = ms / 1000;
-    duration.tv_nsec = (long)(ms % 1000) * 1000000L;
-    nanosleep(&duration, NULL);
+    Sleep(ms);
 }
 
 static double runner_monotonic_seconds(void)
 {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0;
+    static LARGE_INTEGER freq;
+    static int init = 0;
+    if (!init)
+    {
+        QueryPerformanceFrequency(&freq);
+        init = 1;
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (double)now.QuadPart / (double)freq.QuadPart;
 }
 
 #define WINDOW_DURATION_SEC 1.0
@@ -48,11 +39,11 @@ struct hashmonke_runner
 {
     struct hashmonke_file *file;
     hashmonke_runner_cb cb;
-    pthread_mutex_t cb_lock;
+    CRITICAL_SECTION cb_lock;
 
     hashmonke_runner_event_cb event_cb;
     struct hashmonke_runner_event_context *event_ctx;
-    pthread_mutex_t event_lock;
+    CRITICAL_SECTION event_lock;
 
     _Atomic size_t next_entry_idx;
     _Atomic uint64_t total_bytes_hashed;
@@ -76,13 +67,13 @@ struct hashmonke_runner
     _Atomic double min_throughput_mb_s;
     _Atomic double max_throughput_mb_s;
 
-    pthread_t coordinator_thread;
-    pthread_t *worker_threads;
+    HANDLE coordinator_thread;
+    HANDLE *worker_threads;
     uint32_t max_workers;
     uint32_t total_workers_spawned;
     bool thread_warmup;
-    pthread_mutex_t thread_mgmt_lock;
-    pthread_mutex_t join_lock;
+    CRITICAL_SECTION thread_mgmt_lock;
+    CRITICAL_SECTION join_lock;
     bool coordinator_joined;
 };
 
@@ -136,12 +127,12 @@ static void runner_hasher_progress_callback(
     ev.file_size = pe->bytes_total;
     ev.throughput_mb_s = mb_s;
 
-    pthread_mutex_lock(&wctx->runner->event_lock);
+    EnterCriticalSection(&wctx->runner->event_lock);
     wctx->runner->event_cb(&ev, wctx->runner->event_ctx);
-    pthread_mutex_unlock(&wctx->runner->event_lock);
+    LeaveCriticalSection(&wctx->runner->event_lock);
 }
 
-static void *worker_func(void *arg)
+static DWORD WINAPI worker_func(LPVOID arg)
 {
     struct hashmonke_runner *runner = (struct hashmonke_runner *)arg;
     struct hashmonke_hasher *hasher = hashmonke_hasher_create();
@@ -151,7 +142,7 @@ static void *worker_func(void *arg)
         atomic_store(&runner->fatal_error, true);
         atomic_store(&runner->interrupted, true);
         atomic_fetch_sub(&runner->active_workers, 1);
-        return NULL;
+        return 0;
     }
 
     while (!atomic_load(&runner->interrupted))
@@ -192,21 +183,21 @@ static void *worker_func(void *arg)
                 ev.file_path = path;
                 ev.display_path = disp;
                 ev.status = HASHMONKE_HASH_MALFORMED;
-                pthread_mutex_lock(&runner->event_lock);
+                EnterCriticalSection(&runner->event_lock);
                 runner->event_cb(&ev, runner->event_ctx);
-                pthread_mutex_unlock(&runner->event_lock);
+                LeaveCriticalSection(&runner->event_lock);
 
                 ev.type = HASHMONKE_RUNNER_EVENT_COMPLETE;
-                pthread_mutex_lock(&runner->event_lock);
+                EnterCriticalSection(&runner->event_lock);
                 runner->event_cb(&ev, runner->event_ctx);
-                pthread_mutex_unlock(&runner->event_lock);
+                LeaveCriticalSection(&runner->event_lock);
             }
 
             if (runner->cb)
             {
-                pthread_mutex_lock(&runner->cb_lock);
+                EnterCriticalSection(&runner->cb_lock);
                 runner->cb(path, HASHMONKE_HASH_MALFORMED);
-                pthread_mutex_unlock(&runner->cb_lock);
+                LeaveCriticalSection(&runner->cb_lock);
             }
             continue;
         }
@@ -224,9 +215,9 @@ static void *worker_func(void *arg)
             ev.entry_index = entry_idx;
             ev.file_path = path;
             ev.display_path = disp;
-            pthread_mutex_lock(&runner->event_lock);
+            EnterCriticalSection(&runner->event_lock);
             runner->event_cb(&ev, runner->event_ctx);
-            pthread_mutex_unlock(&runner->event_lock);
+            LeaveCriticalSection(&runner->event_lock);
         }
 
         // HASHMONKE_ENTRY_OK: Execute verification
@@ -294,9 +285,9 @@ static void *worker_func(void *arg)
             ev.file_size = atomic_load(&ctrl.bytes_total);
             ev.throughput_mb_s = mb_s;
 
-            pthread_mutex_lock(&runner->event_lock);
+            EnterCriticalSection(&runner->event_lock);
             runner->event_cb(&ev, runner->event_ctx);
-            pthread_mutex_unlock(&runner->event_lock);
+            LeaveCriticalSection(&runner->event_lock);
         }
 
         if (hcode == HASHMONKE_HASH_INTERNAL_ERR)
@@ -305,9 +296,9 @@ static void *worker_func(void *arg)
             atomic_store(&runner->interrupted, true);
             if (runner->cb)
             {
-                pthread_mutex_lock(&runner->cb_lock);
+                EnterCriticalSection(&runner->cb_lock);
                 runner->cb(entry->file_path, hcode);
-                pthread_mutex_unlock(&runner->cb_lock);
+                LeaveCriticalSection(&runner->cb_lock);
             }
             break;
         }
@@ -327,9 +318,9 @@ static void *worker_func(void *arg)
 
         if (runner->cb)
         {
-            pthread_mutex_lock(&runner->cb_lock);
+            EnterCriticalSection(&runner->cb_lock);
             runner->cb(entry->file_path, hcode);
-            pthread_mutex_unlock(&runner->cb_lock);
+            LeaveCriticalSection(&runner->cb_lock);
         }
     }
 
@@ -338,31 +329,31 @@ static void *worker_func(void *arg)
         hashmonke_hasher_free(hasher);
     }
     atomic_fetch_sub(&runner->active_workers, 1);
-    return NULL;
+    return 0;
 }
 
 static bool spawn_worker(struct hashmonke_runner *runner)
 {
-    pthread_mutex_lock(&runner->thread_mgmt_lock);
+    EnterCriticalSection(&runner->thread_mgmt_lock);
     if (runner->total_workers_spawned >= runner->max_workers)
     {
-        pthread_mutex_unlock(&runner->thread_mgmt_lock);
+        LeaveCriticalSection(&runner->thread_mgmt_lock);
         return false;
     }
 
     atomic_fetch_add(&runner->active_workers, 1);
-    pthread_t thread;
-    if (pthread_create(&thread, NULL, worker_func, runner) != 0)
+    HANDLE thread = CreateThread(NULL, 0, worker_func, runner, 0, NULL);
+    if (!thread)
     {
         atomic_fetch_sub(&runner->active_workers, 1);
         atomic_store(&runner->fatal_error, true);
         atomic_store(&runner->interrupted, true);
-        pthread_mutex_unlock(&runner->thread_mgmt_lock);
+        LeaveCriticalSection(&runner->thread_mgmt_lock);
         return false;
     }
 
     runner->worker_threads[runner->total_workers_spawned++] = thread;
-    pthread_mutex_unlock(&runner->thread_mgmt_lock);
+    LeaveCriticalSection(&runner->thread_mgmt_lock);
     return true;
 }
 
@@ -373,7 +364,7 @@ enum tuner_state
     STATE_LOCKED
 };
 
-static void *coordinator_func(void *arg)
+static DWORD WINAPI coordinator_func(LPVOID arg)
 {
     struct hashmonke_runner *runner = (struct hashmonke_runner *)arg;
 
@@ -605,16 +596,17 @@ static void *coordinator_func(void *arg)
     }
 
     // Join all spawned workers
-    pthread_mutex_lock(&runner->thread_mgmt_lock);
+    EnterCriticalSection(&runner->thread_mgmt_lock);
     for (uint32_t i = 0; i < runner->total_workers_spawned; ++i)
     {
-        pthread_join(runner->worker_threads[i], NULL);
+        WaitForSingleObject(runner->worker_threads[i], INFINITE);
+        CloseHandle(runner->worker_threads[i]);
     }
     runner->total_workers_spawned = 0;
-    pthread_mutex_unlock(&runner->thread_mgmt_lock);
+    LeaveCriticalSection(&runner->thread_mgmt_lock);
 
     atomic_store(&runner->is_finished, true);
-    return NULL;
+    return 0;
 }
 
 struct hashmonke_runner *hashmonke_runner_run_with_events(
@@ -635,32 +627,11 @@ struct hashmonke_runner *hashmonke_runner_run_with_events(
     runner->event_ctx = event_ctx;
     runner->thread_warmup = thread_warmup;
     atomic_store(&runner->min_hash_workers, UINT32_MAX);
-    if (pthread_mutex_init(&runner->cb_lock, NULL) != 0)
-    {
-        free(runner);
-        return NULL;
-    }
-    if (pthread_mutex_init(&runner->event_lock, NULL) != 0)
-    {
-        pthread_mutex_destroy(&runner->cb_lock);
-        free(runner);
-        return NULL;
-    }
-    if (pthread_mutex_init(&runner->thread_mgmt_lock, NULL) != 0)
-    {
-        pthread_mutex_destroy(&runner->event_lock);
-        pthread_mutex_destroy(&runner->cb_lock);
-        free(runner);
-        return NULL;
-    }
-    if (pthread_mutex_init(&runner->join_lock, NULL) != 0)
-    {
-        pthread_mutex_destroy(&runner->thread_mgmt_lock);
-        pthread_mutex_destroy(&runner->event_lock);
-        pthread_mutex_destroy(&runner->cb_lock);
-        free(runner);
-        return NULL;
-    }
+
+    InitializeCriticalSection(&runner->cb_lock);
+    InitializeCriticalSection(&runner->event_lock);
+    InitializeCriticalSection(&runner->thread_mgmt_lock);
+    InitializeCriticalSection(&runner->join_lock);
 
     runner->max_workers = get_logical_cores();
     if (runner->max_workers < 1)
@@ -674,24 +645,25 @@ struct hashmonke_runner *hashmonke_runner_run_with_events(
         starting_workers = runner->max_workers;
     atomic_store(&runner->target_workers, starting_workers);
 
-    runner->worker_threads = (pthread_t *)malloc(sizeof(pthread_t) * runner->max_workers);
+    runner->worker_threads = (HANDLE *)malloc(sizeof(HANDLE) * runner->max_workers);
     if (!runner->worker_threads)
     {
-        pthread_mutex_destroy(&runner->join_lock);
-        pthread_mutex_destroy(&runner->thread_mgmt_lock);
-        pthread_mutex_destroy(&runner->event_lock);
-        pthread_mutex_destroy(&runner->cb_lock);
+        DeleteCriticalSection(&runner->join_lock);
+        DeleteCriticalSection(&runner->thread_mgmt_lock);
+        DeleteCriticalSection(&runner->event_lock);
+        DeleteCriticalSection(&runner->cb_lock);
         free(runner);
         return NULL;
     }
 
-    if (pthread_create(&runner->coordinator_thread, NULL, coordinator_func, runner) != 0)
+    runner->coordinator_thread = CreateThread(NULL, 0, coordinator_func, runner, 0, NULL);
+    if (!runner->coordinator_thread)
     {
         free(runner->worker_threads);
-        pthread_mutex_destroy(&runner->join_lock);
-        pthread_mutex_destroy(&runner->thread_mgmt_lock);
-        pthread_mutex_destroy(&runner->event_lock);
-        pthread_mutex_destroy(&runner->cb_lock);
+        DeleteCriticalSection(&runner->join_lock);
+        DeleteCriticalSection(&runner->thread_mgmt_lock);
+        DeleteCriticalSection(&runner->event_lock);
+        DeleteCriticalSection(&runner->cb_lock);
         free(runner);
         return NULL;
     }
@@ -720,11 +692,15 @@ void hashmonke_runner_wait(struct hashmonke_runner *runner)
 {
     if (!runner)
         return;
-    pthread_mutex_lock(&runner->join_lock);
-    if (!runner->coordinator_joined &&
-        pthread_join(runner->coordinator_thread, NULL) == 0)
+    EnterCriticalSection(&runner->join_lock);
+    if (!runner->coordinator_joined && runner->coordinator_thread)
+    {
+        WaitForSingleObject(runner->coordinator_thread, INFINITE);
+        CloseHandle(runner->coordinator_thread);
+        runner->coordinator_thread = NULL;
         runner->coordinator_joined = true;
-    pthread_mutex_unlock(&runner->join_lock);
+    }
+    LeaveCriticalSection(&runner->join_lock);
 }
 
 void hashmonke_runner_interrupt(struct hashmonke_runner *runner)
@@ -765,10 +741,10 @@ void hashmonke_runner_free(struct hashmonke_runner *runner)
     hashmonke_runner_interrupt(runner);
     hashmonke_runner_wait(runner);
 
-    pthread_mutex_destroy(&runner->cb_lock);
-    pthread_mutex_destroy(&runner->event_lock);
-    pthread_mutex_destroy(&runner->thread_mgmt_lock);
-    pthread_mutex_destroy(&runner->join_lock);
+    DeleteCriticalSection(&runner->cb_lock);
+    DeleteCriticalSection(&runner->event_lock);
+    DeleteCriticalSection(&runner->thread_mgmt_lock);
+    DeleteCriticalSection(&runner->join_lock);
     free(runner->worker_threads);
     free(runner);
 }

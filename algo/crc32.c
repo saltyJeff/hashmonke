@@ -49,6 +49,21 @@ static const uint32_t crc32_table[256] = {
     0xb3667a2eUL, 0xc4614ab8UL, 0x5d681b02UL, 0x2a6f2b94UL, 0xb40bbe37UL, 0xc30c8ea1UL, 0x5a05df1bUL, 0x2d02ef8dUL,
 };
 
+#if defined(CRC32_ASM)
+#include <intrin.h>
+static inline int has_pclmul_support(void)
+{
+    static int supported = -1;
+    if (supported == -1)
+    {
+        int cpu_info[4];
+        __cpuid(cpu_info, 1);
+        supported = (cpu_info[2] & (1 << 1)) != 0; // ECX bit 1 is PCLMULQDQ
+    }
+    return supported;
+}
+#endif
+
 static void crc32_update(struct hashmonke_md *md, const char *data, size_t len)
 {
     CRC32_CTX *c = (CRC32_CTX *)md->ctx;
@@ -56,7 +71,7 @@ static void crc32_update(struct hashmonke_md *md, const char *data, size_t len)
     const uint8_t *p = (const uint8_t *)data;
 
 #if defined(CRC32_ASM)
-    if (len >= 64 && __builtin_cpu_supports("pclmul"))
+    if (len >= 64 && has_pclmul_support())
     {
         size_t block_len = len & ~15ULL;
         crc = crc32_arch_asm(crc, p, block_len);

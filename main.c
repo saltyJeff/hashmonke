@@ -1,17 +1,14 @@
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
 #include "cli.h"
 #include "file.h"
 #include "hash.h"
 #include "runner.h"
 #include "tui_render.h"
+#include <io.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
+#include <windows.h>
 
 static volatile sig_atomic_t g_interrupted = 0;
 
@@ -23,22 +20,26 @@ static void sigint_handler(int sig)
 
 static bool is_terminal(FILE *stream)
 {
-    return isatty(fileno(stream)) != 0;
+    return _isatty(_fileno(stream)) != 0;
 }
 
 static double monotonic_seconds(void)
 {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0;
+    static LARGE_INTEGER freq;
+    static int init = 0;
+    if (!init)
+    {
+        QueryPerformanceFrequency(&freq);
+        init = 1;
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (double)now.QuadPart / (double)freq.QuadPart;
 }
 
 static void sleep_ms(unsigned int milliseconds)
 {
-    struct timespec duration;
-    duration.tv_sec = milliseconds / 1000;
-    duration.tv_nsec = (long)(milliseconds % 1000) * 1000000L;
-    nanosleep(&duration, NULL);
+    Sleep(milliseconds);
 }
 
 static void wait_for_keypress(void)

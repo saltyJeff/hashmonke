@@ -25,6 +25,17 @@
 	.p2align	4
 crc32_arch_asm:                         # @crc32_arch_asm
 # %bb.0:
+	pushq	%rdi
+	pushq	%rsi
+	subq	$88, %rsp
+	movdqu	%xmm6, (%rsp)
+	movdqu	%xmm7, 16(%rsp)
+	movdqu	%xmm8, 32(%rsp)
+	movdqu	%xmm9, 48(%rsp)
+	movdqu	%xmm10, 64(%rsp)
+	movl	%ecx, %edi
+	movq	%rdx, %rsi
+	movq	%r8, %rdx
 	movdqu	(%rsi), %xmm1
 	movdqu	16(%rsi), %xmm2
 	movdqu	32(%rsi), %xmm4
@@ -173,6 +184,14 @@ crc32_arch_asm:                         # @crc32_arch_asm
 	pclmulqdq	$0, %xmm1, %xmm0
 	pxor	%xmm2, %xmm0
 	pextrd	$1, %xmm0, %eax
+	movdqu	(%rsp), %xmm6
+	movdqu	16(%rsp), %xmm7
+	movdqu	32(%rsp), %xmm8
+	movdqu	48(%rsp), %xmm9
+	movdqu	64(%rsp), %xmm10
+	addq	$88, %rsp
+	popq	%rsi
+	popq	%rdi
 	retq
                                         # -- End function
 	.section	.debug$S,"dr"
