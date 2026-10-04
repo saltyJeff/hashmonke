@@ -1,6 +1,8 @@
 #include "doctest.h"
+extern "C" {
 #include "file.h"
 #include "runner.h"
+}
 #include "test_utils.hpp"
 #include <atomic>
 #include <chrono>

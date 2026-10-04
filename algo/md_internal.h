@@ -6,7 +6,7 @@
 #include <string.h>
 
 typedef void (*hashmonke_md_update_func_t)(struct hashmonke_md *md, const char *data, size_t len);
-typedef const char *(*hashmonke_md_final_func_t)(struct hashmonke_md *md);
+typedef const uint8_t *(*hashmonke_md_final_func_t)(struct hashmonke_md *md);
 
 struct hashmonke_md
 {

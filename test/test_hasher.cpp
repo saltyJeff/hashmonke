@@ -1,5 +1,7 @@
 #include "doctest.h"
-#include "hash.h"
+extern "C" {
+#include "hasher.h"
+}
 #include "test_utils.hpp"
 #include <cstdio>
 #include <cstring>
@@ -7,25 +9,13 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-#include <fcntl.h>
-#include <io.h>
-#else
+#ifndef _WIN32
 #include <cerrno>
-#include <fcntl.h>
+#include <fcntl>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 #endif
-
-static int open_hash_test_file(const char *path)
-{
-#ifdef _WIN32
-    return _open(path, _O_RDONLY | _O_BINARY);
-#else
-    return open(path, O_RDONLY);
-#endif
-}
 
 static size_t test_digest_size(enum hashmonke_algo algo)
 {
@@ -33,17 +23,33 @@ static size_t test_digest_size(enum hashmonke_algo algo)
 }
 
 static enum hashmonke_hash_code hash_test_file(
-    struct hashmonke_hasher *hasher, const char *path, const char *expected,
-    enum hashmonke_algo algo, hashmonke_hash_progress_cb progress = nullptr,
-    void *user_data = nullptr)
+    struct hashmonke_hasher *hasher, const char *path, const uint8_t *expected,
+    enum hashmonke_algo algo, bool text_mode = false,
+    struct hashmonke_hash_stats *out_stats = nullptr)
 {
     size_t digest_size = test_digest_size(algo);
-    char *digest = static_cast<char *>(malloc(digest_size));
-    if (!digest)
-        return HASHMONKE_HASH_INTERNAL_ERR;
-    memcpy(digest, expected, digest_size);
-    return hashmonke_hasher_hash(
-        hasher, open_hash_test_file(path), digest, algo, progress, user_data);
+    std::vector<uint8_t> buf(sizeof(struct hashmonke_hash) + digest_size);
+    struct hashmonke_hash *h = reinterpret_cast<struct hashmonke_hash *>(buf.data());
+    h->algo = algo;
+    if (expected)
+    {
+        memcpy(h->value, expected, digest_size);
+    }
+
+    struct hashmonke_hash_stats stats;
+    memset(&stats, 0, sizeof(stats));
+
+    enum hashmonke_hash_code code = hashmonke_hasher_hash(
+        hasher, path, text_mode, h, &stats);
+
+    if (out_stats)
+    {
+        out_stats->bytes_hashed = stats.bytes_hashed;
+        out_stats->bytes_total = stats.bytes_total;
+        out_stats->ms_elapsed = stats.ms_elapsed;
+        out_stats->file_path = stats.file_path;
+    }
+    return code;
 }
 
 static void create_test_file(const std::string &path, const std::string &data)
@@ -65,7 +71,7 @@ static void create_large_test_file(const std::string &path, size_t size, char by
     }
 }
 
-TEST_CASE("Hasher: Exact Match and Mismatch for MD5, SHA1, CRC32")
+TEST_CASE("Hasher: Exact Match and Mismatch for MD5, SHA1, SFV")
 {
     struct hashmonke_hasher *hasher = hashmonke_hasher_create();
     REQUIRE(hasher != nullptr);
@@ -75,31 +81,32 @@ TEST_CASE("Hasher: Exact Match and Mismatch for MD5, SHA1, CRC32")
 
     // MD5 exact match
     std::vector<uint8_t> md5_expected = from_hex("900150983cd24fb0d6963f7d28e17f72");
+    struct hashmonke_hash_stats stats;
     enum hashmonke_hash_code code =
-        hash_test_file(hasher, test_file.c_str(), (const char *)md5_expected.data(), HASHMONKE_ALGO_MD5);
+        hash_test_file(hasher, test_file.c_str(), md5_expected.data(), HASHMONKE_ALGO_MD5, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), 3u);
+    CHECK_EQ(stats.bytes_hashed, 3u);
 
     // MD5 mismatch
     std::vector<uint8_t> md5_wrong = from_hex("00000000000000000000000000000000");
-    code = hash_test_file(hasher, test_file.c_str(), (const char *)md5_wrong.data(), HASHMONKE_ALGO_MD5);
+    code = hash_test_file(hasher, test_file.c_str(), md5_wrong.data(), HASHMONKE_ALGO_MD5, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MISMATCH);
 
     // SHA1 exact match
     std::vector<uint8_t> sha1_expected = from_hex("a9993e364706816aba3e25717850c26c9cd0d89d");
-    code = hash_test_file(hasher, test_file.c_str(), (const char *)sha1_expected.data(), HASHMONKE_ALGO_SHA1);
+    code = hash_test_file(hasher, test_file.c_str(), sha1_expected.data(), HASHMONKE_ALGO_SHA1, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), 3u);
+    CHECK_EQ(stats.bytes_hashed, 3u);
 
-    // CRC32 exact match
-    std::vector<uint8_t> crc_expected = from_hex("352441c2");
-    code = hash_test_file(hasher, test_file.c_str(), (const char *)crc_expected.data(), HASHMONKE_ALGO_CRC32);
+    // SFV exact match
+    std::vector<uint8_t> sfv_expected = from_hex("352441c2");
+    code = hash_test_file(hasher, test_file.c_str(), sfv_expected.data(), HASHMONKE_ALGO_SFV, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), 3u);
+    CHECK_EQ(stats.bytes_hashed, 3u);
 
-    // CRC32 mismatch
-    std::vector<uint8_t> crc_wrong = from_hex("12345678");
-    code = hash_test_file(hasher, test_file.c_str(), (const char *)crc_wrong.data(), HASHMONKE_ALGO_CRC32);
+    // SFV mismatch
+    std::vector<uint8_t> sfv_wrong = from_hex("12345678");
+    code = hash_test_file(hasher, test_file.c_str(), sfv_wrong.data(), HASHMONKE_ALGO_SFV, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MISMATCH);
 
     hashmonke_hasher_free(hasher);
@@ -113,18 +120,19 @@ TEST_CASE("Hasher: Missing file returns IO error")
 
     create_test_file("test_before_missing.tmp", "abc");
     std::vector<uint8_t> expected = from_hex("900150983cd24fb0d6963f7d28e17f72");
-    CHECK_EQ(hash_test_file(hasher, "test_before_missing.tmp", (const char *)expected.data(),
-                                   HASHMONKE_ALGO_MD5), HASHMONKE_HASH_MATCHES);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), 3u);
-    CHECK_EQ(hash_test_file(hasher, "test_before_missing.tmp", (const char *)expected.data(),
-                                   static_cast<enum hashmonke_algo>(99)), HASHMONKE_HASH_INTERNAL_ERR);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), 0u);
+    struct hashmonke_hash_stats stats;
+    CHECK_EQ(hash_test_file(hasher, "test_before_missing.tmp", expected.data(),
+                            HASHMONKE_ALGO_MD5, false, &stats), HASHMONKE_HASH_MATCHES);
+    CHECK_EQ(stats.bytes_hashed, 3u);
+    CHECK_EQ(hash_test_file(hasher, "test_before_missing.tmp", expected.data(),
+                            static_cast<enum hashmonke_algo>(99), false, &stats), HASHMONKE_HASH_INTERNAL_ERR);
+    CHECK_EQ(stats.bytes_hashed, 0u);
 
     std::vector<uint8_t> dummy = from_hex("900150983cd24fb0d6963f7d28e17f72");
     enum hashmonke_hash_code code = hash_test_file(
-        hasher, "non_existent_file_definitely_not_here.bin", (const char *)dummy.data(), HASHMONKE_ALGO_MD5);
+        hasher, "non_existent_file_definitely_not_here.bin", dummy.data(), HASHMONKE_ALGO_MD5, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_IO_ERR);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), 0u);
+    CHECK_EQ(stats.bytes_hashed, 0u);
 
     hashmonke_hasher_free(hasher);
     std::remove("test_before_missing.tmp");
@@ -138,16 +146,17 @@ TEST_CASE("Hasher: Empty file (0 bytes)")
     std::string empty_file = "test_empty.tmp";
     create_test_file(empty_file, "");
 
+    struct hashmonke_hash_stats stats;
     std::vector<uint8_t> md5_empty = from_hex("d41d8cd98f00b204e9800998ecf8427e");
     enum hashmonke_hash_code code =
-        hash_test_file(hasher, empty_file.c_str(), (const char *)md5_empty.data(), HASHMONKE_ALGO_MD5);
+        hash_test_file(hasher, empty_file.c_str(), md5_empty.data(), HASHMONKE_ALGO_MD5, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), 0u);
+    CHECK_EQ(stats.bytes_hashed, 0u);
 
-    std::vector<uint8_t> crc_empty = from_hex("00000000");
-    code = hash_test_file(hasher, empty_file.c_str(), (const char *)crc_empty.data(), HASHMONKE_ALGO_CRC32);
+    std::vector<uint8_t> sfv_empty = from_hex("00000000");
+    code = hash_test_file(hasher, empty_file.c_str(), sfv_empty.data(), HASHMONKE_ALGO_SFV, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), 0u);
+    CHECK_EQ(stats.bytes_hashed, 0u);
 
     hashmonke_hasher_free(hasher);
     std::remove(empty_file.c_str());
@@ -163,38 +172,39 @@ TEST_CASE("Hasher: File larger than buffer size through pipeline")
     std::string large_file = "test_large_pipeline.tmp";
     create_large_test_file(large_file, file_size, 'A');
 
-    // Compute expected CRC32 and MD5 reference using algo streaming update
-    struct hashmonke_md *crc_md = hashmonke_md_crc32();
+    // Compute expected SFV and MD5 reference using algo streaming update
+    struct hashmonke_md *sfv_md = hashmonke_md_crc32();
     struct hashmonke_md *md5_md = hashmonke_md_md5();
     std::vector<char> ref_chunk(64 * 1024, 'A');
     size_t rem = file_size;
     while (rem > 0)
     {
         size_t n = std::min(rem, ref_chunk.size());
-        hashmonke_md_update_func(crc_md, ref_chunk.data(), n);
+        hashmonke_md_update_func(sfv_md, ref_chunk.data(), n);
         hashmonke_md_update_func(md5_md, ref_chunk.data(), n);
         rem -= n;
     }
-    const char *crc_ref = hashmonke_md_final_func(crc_md);
-    const char *md5_ref = hashmonke_md_final_func(md5_md);
+    const uint8_t *sfv_ref = hashmonke_md_final_func(sfv_md);
+    const uint8_t *md5_ref = hashmonke_md_final_func(md5_md);
 
     // Verify through pipeline
+    struct hashmonke_hash_stats stats;
     enum hashmonke_hash_code code =
-        hash_test_file(hasher, large_file.c_str(), crc_ref, HASHMONKE_ALGO_CRC32);
+        hash_test_file(hasher, large_file.c_str(), sfv_ref, HASHMONKE_ALGO_SFV, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), file_size);
+    CHECK_EQ(stats.bytes_hashed, file_size);
 
-    code = hash_test_file(hasher, large_file.c_str(), md5_ref, HASHMONKE_ALGO_MD5);
+    code = hash_test_file(hasher, large_file.c_str(), md5_ref, HASHMONKE_ALGO_MD5, false, &stats);
     CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), file_size);
+    CHECK_EQ(stats.bytes_hashed, file_size);
 
-    free((void *)crc_ref);
+    free((void *)sfv_ref);
     free((void *)md5_ref);
     hashmonke_hasher_free(hasher);
     std::remove(large_file.c_str());
 }
 
-TEST_CASE("Hasher: Binary data at pipeline buffer boundaries with progress")
+TEST_CASE("Hasher: Binary data at pipeline buffer boundaries")
 {
     struct hashmonke_hasher *hasher = hashmonke_hasher_create();
     REQUIRE(hasher != nullptr);
@@ -212,23 +222,41 @@ TEST_CASE("Hasher: Binary data at pipeline buffer boundaries with progress")
         const std::string content = data.substr(0, size);
         create_test_file(path, content);
         auto expected = from_hex(hash_string(hashmonke_md_sha1(), content));
-        std::vector<size_t> chunks;
-        auto progress = [](size_t bytes, void *user_data) {
-            static_cast<std::vector<size_t> *>(user_data)->push_back(bytes);
-        };
-        CHECK_EQ(hash_test_file(hasher, path.c_str(),
-                     reinterpret_cast<const char *>(expected.data()), HASHMONKE_ALGO_SHA1,
-                     progress, &chunks), HASHMONKE_HASH_MATCHES);
-        CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), size);
-        CHECK_EQ(chunks.size(), (size + buffer_size - 1) / buffer_size);
-        size_t remaining = size;
-        for (size_t chunk : chunks)
-        {
-            CHECK_EQ(chunk, std::min(remaining, buffer_size));
-            remaining -= chunk;
-        }
-        CHECK_EQ(remaining, 0u);
+        struct hashmonke_hash_stats stats;
+        CHECK_EQ(hash_test_file(hasher, path.c_str(), expected.data(), HASHMONKE_ALGO_SHA1,
+                                false, &stats), HASHMONKE_HASH_MATCHES);
+        CHECK_EQ(stats.bytes_hashed, size);
+        CHECK_EQ(stats.bytes_total, size);
     }
+
+    hashmonke_hasher_free(hasher);
+    std::remove(path.c_str());
+}
+
+TEST_CASE("Hasher: Text mode translation vs binary mode")
+{
+    struct hashmonke_hasher *hasher = hashmonke_hasher_create();
+    REQUIRE(hasher != nullptr);
+
+    const std::string path = "test_text_mode.tmp";
+    create_test_file(path, "line1\r\nline2\r\n");
+
+#ifdef _WIN32
+    std::string expected_content = "line1\nline2\n";
+#else
+    std::string expected_content = "line1\r\nline2\r\n";
+#endif
+    auto expected_text = from_hex(hash_string(hashmonke_md_md5(), expected_content));
+    struct hashmonke_hash_stats stats;
+    CHECK_EQ(hash_test_file(hasher, path.c_str(), expected_text.data(), HASHMONKE_ALGO_MD5, true, &stats),
+             HASHMONKE_HASH_MATCHES);
+    CHECK_EQ(stats.bytes_hashed, expected_content.size());
+
+    std::string raw_content = "line1\r\nline2\r\n";
+    auto expected_bin = from_hex(hash_string(hashmonke_md_md5(), raw_content));
+    CHECK_EQ(hash_test_file(hasher, path.c_str(), expected_bin.data(), HASHMONKE_ALGO_MD5, false, &stats),
+             HASHMONKE_HASH_MATCHES);
+    CHECK_EQ(stats.bytes_hashed, raw_content.size());
 
     hashmonke_hasher_free(hasher);
     std::remove(path.c_str());
@@ -269,12 +297,12 @@ TEST_CASE("Hasher: Short reads from a sequential stream")
         close(fd);
     });
 
-    auto code = hash_test_file(hasher, path.c_str(),
-                    reinterpret_cast<const char *>(expected.data()), HASHMONKE_ALGO_SHA1);
+    struct hashmonke_hash_stats stats;
+    auto code = hash_test_file(hasher, path.c_str(), expected.data(), HASHMONKE_ALGO_SHA1, false, &stats);
     writer.join();
     CHECK(write_ok);
     CHECK_EQ(code, HASHMONKE_HASH_MATCHES);
-    CHECK_EQ(hashmonke_hasher_get_last_bytes(hasher), data.size());
+    CHECK_EQ(stats.bytes_hashed, data.size());
     hashmonke_hasher_free(hasher);
     std::remove(path.c_str());
     rmdir(directory);

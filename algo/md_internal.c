@@ -18,7 +18,7 @@ size_t hashmonke_md_digest_size(struct hashmonke_md *md)
     return 0;
 }
 
-const char *hashmonke_md_final_func(struct hashmonke_md *md)
+const uint8_t *hashmonke_md_final_func(struct hashmonke_md *md)
 {
     if (md && md->final)
     {

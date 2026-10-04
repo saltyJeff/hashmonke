@@ -61,6 +61,7 @@ struct hashmonke_runner
     hashmonke_runner_cb cb;
     pthread_mutex_t cb_lock;
 
+    _Atomic size_t next_entry_idx;
     _Atomic uint64_t total_bytes_hashed;
     _Atomic uint32_t active_workers;
     _Atomic uint32_t current_hash_workers;
@@ -90,12 +91,6 @@ struct hashmonke_runner
     bool coordinator_joined;
 };
 
-static void record_progress(size_t bytes, void *user_data)
-{
-    struct hashmonke_runner *runner = (struct hashmonke_runner *)user_data;
-    atomic_fetch_add(&runner->total_bytes_hashed, bytes);
-}
-
 static void record_hash_worker_count(struct hashmonke_runner *runner, uint32_t count)
 {
     uint32_t observed = atomic_load(&runner->max_hash_workers);
@@ -109,14 +104,6 @@ static void record_hash_worker_count(struct hashmonke_runner *runner, uint32_t c
            !atomic_compare_exchange_weak(&runner->min_hash_workers, &observed, count))
     {
     }
-}
-
-static void free_tuple_strings(struct hashmonke_hash_tuple *tup)
-{
-    free(tup->file_abs_path);
-    free(tup->raw_line);
-    tup->file_abs_path = NULL;
-    tup->raw_line = NULL;
 }
 
 static void *worker_func(void *arg)
@@ -143,21 +130,16 @@ static void *worker_func(void *arg)
         if (requests > 0)
             break;
 
-        struct hashmonke_hash_tuple tup;
-        enum hashmonke_it_code it_code = hashmonke_file_next_tuple(runner->file, &tup);
+        size_t entry_idx = atomic_fetch_add(&runner->next_entry_idx, 1);
+        if (entry_idx >= runner->file->num_entries)
+        {
+            atomic_store(&runner->manifest_eof, true);
+            break;
+        }
 
-        if (it_code == HASHMONKE_IT_EOF)
-        {
-            atomic_store(&runner->manifest_eof, true);
-            break;
-        }
-        if (it_code == HASHMONKE_IT_ERR)
-        {
-            atomic_store(&runner->manifest_eof, true);
-            atomic_store(&runner->fatal_error, true);
-            break;
-        }
-        if (it_code == HASHMONKE_IT_MALFORMED)
+        struct hashmonke_file_entry *entry = &runner->file->entries[entry_idx];
+
+        if (entry->code != HASHMONKE_ENTRY_OK)
         {
             atomic_fetch_add(&runner->files_malformed, 1);
             atomic_fetch_add(&runner->total_files_processed, 1);
@@ -165,26 +147,36 @@ static void *worker_func(void *arg)
             if (runner->cb)
             {
                 pthread_mutex_lock(&runner->cb_lock);
-                runner->cb(tup.raw_line ? tup.raw_line : "<malformed>", HASHMONKE_HASH_MALFORMED);
+                runner->cb(entry->file_path ? entry->file_path : "<malformed>", HASHMONKE_HASH_MALFORMED);
                 pthread_mutex_unlock(&runner->cb_lock);
             }
-            free_tuple_strings(&tup);
             continue;
         }
 
-        // HASHMONKE_IT_OK: Execute verification
-        enum hashmonke_hash_code hcode = HASHMONKE_HASH_IO_ERR;
-        int file_fd = tup.file_fd;
-        tup.file_fd = -1; /* Ownership transfers to the hasher call. */
-        char *expected_hash = tup.hash;
-        tup.hash = NULL; /* The hasher consumes and frees the digest. */
+        // HASHMONKE_ENTRY_OK: Execute verification
+        uint8_t expected_buf[sizeof(struct hashmonke_hash) + 20];
+        struct hashmonke_hash *expected = (struct hashmonke_hash *)expected_buf;
+        expected->algo = entry->algo;
+        int sz = hashmonke_hash_size(expected);
+        if (sz > 0 && entry->hash)
+        {
+            memcpy(expected->value, entry->hash, (size_t)sz);
+        }
+
+        struct hashmonke_hash_stats stats;
+        memset(&stats, 0, sizeof(stats));
+
         uint32_t hashing_workers = atomic_fetch_add(&runner->current_hash_workers, 1) + 1;
         record_hash_worker_count(runner, hashing_workers);
-        hcode = hashmonke_hasher_hash(hasher, file_fd, expected_hash, tup.algo,
-                                                    record_progress, runner);
+
+        enum hashmonke_hash_code hcode = hashmonke_hasher_hash(
+            hasher, entry->file_path, entry->text_mode, expected, &stats);
+
         uint32_t remaining_hash_workers = atomic_fetch_sub(&runner->current_hash_workers, 1) - 1;
         if (remaining_hash_workers > 0)
             record_hash_worker_count(runner, remaining_hash_workers);
+
+        atomic_fetch_add(&runner->total_bytes_hashed, atomic_load(&stats.bytes_hashed));
         atomic_fetch_add(&runner->total_files_processed, 1);
 
         if (hcode == HASHMONKE_HASH_INTERNAL_ERR)
@@ -194,10 +186,9 @@ static void *worker_func(void *arg)
             if (runner->cb)
             {
                 pthread_mutex_lock(&runner->cb_lock);
-                runner->cb(tup.file_abs_path, hcode);
+                runner->cb(entry->file_path, hcode);
                 pthread_mutex_unlock(&runner->cb_lock);
             }
-            free_tuple_strings(&tup);
             break;
         }
 
@@ -217,11 +208,9 @@ static void *worker_func(void *arg)
         if (runner->cb)
         {
             pthread_mutex_lock(&runner->cb_lock);
-            runner->cb(tup.file_abs_path, hcode);
+            runner->cb(entry->file_path, hcode);
             pthread_mutex_unlock(&runner->cb_lock);
         }
-
-        free_tuple_strings(&tup);
     }
 
     if (hasher)

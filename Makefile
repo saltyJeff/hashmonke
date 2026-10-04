@@ -33,8 +33,8 @@ ALL_ALGO_OBJS = algo/md_internal.o algo/md5_c.o algo/sha1_c.o algo/crc32_c.o \
 	algo/md5_asm.o algo/md5_x86_64.o algo/sha1_asm.o algo/sha1_x86_64.o \
 	algo/crc32_asm.o algo/crc32_x86_64.o
 
-CORE_OBJS = file.o file_sfv.o file_gnu.o file_bsd.o hash.o runner.o cli.o
-TEST_OBJS = test/main.o test/test_md5.o test/test_sha1.o test/test_crc32.o test/test_file.o test/test_hash.o test/test_runner.o test/test_cli.o test/test_e2e.o
+CORE_OBJS = file.o file_sfv.o file_gnu.o file_bsd.o hasher.o runner.o cli.o
+TEST_OBJS = test/main.o test/test_md5.o test/test_sha1.o test/test_crc32.o test/test_file.o test/test_hasher.o test/test_runner.o test/test_cli.o test/test_e2e.o
 DEPFILES = $(CORE_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(ALGO_OBJS:.o=.d) main.d
 TEST_BIN = test/test_hashmonke
 BIN = hashmonke

@@ -1,4 +1,6 @@
+extern "C" {
 #include "cli.h"
+}
 #include "doctest.h"
 #include <vector>
 

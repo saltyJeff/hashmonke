@@ -56,7 +56,7 @@ bool hashmonke_parse_sfv(const char *line, const char *base_dir, struct hashmonk
         return false;
 
     size_t out_len = 0;
-    char *bytes = hashmonke_hex_to_bytes(hex, 8, &out_len);
+    uint8_t *bytes = hashmonke_hex_to_bytes(hex, 8, &out_len);
     if (!bytes || out_len != 4)
     {
         if (bytes)
@@ -67,8 +67,8 @@ bool hashmonke_parse_sfv(const char *line, const char *base_dir, struct hashmonk
 
     entry->hash = bytes;
     entry->file_path = abs_path;
-    entry->text_mode = true;
-    entry->algo = HASHMONKE_ALGO_CRC32;
+    entry->text_mode = false;
+    entry->algo = HASHMONKE_ALGO_SFV;
     return true;
 }
 

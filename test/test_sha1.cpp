@@ -20,7 +20,7 @@ TEST_CASE("SHA1 Streaming Updates") {
     for (char c : input) {
         hashmonke_md_update_func(md, &c, 1);
     }
-    const char *digest = hashmonke_md_final_func(md);
+    const uint8_t *digest = hashmonke_md_final_func(md);
     std::string hex = to_hex(digest, 20);
     free((void*)digest);
     
@@ -33,7 +33,7 @@ TEST_CASE("SHA1 Large Payload (1 million 'a's)") {
     for (int i = 0; i < 1000; ++i) {
         hashmonke_md_update_func(md, chunk.data(), chunk.size());
     }
-    const char *digest = hashmonke_md_final_func(md);
+    const uint8_t *digest = hashmonke_md_final_func(md);
     std::string hex = to_hex(digest, 20);
     free((void*)digest);
     
@@ -44,6 +44,6 @@ TEST_CASE("SHA1 Interface properties") {
     struct hashmonke_md *md = hashmonke_md_sha1();
     CHECK_EQ(hashmonke_md_digest_size(md), 20u);
     
-    const char *digest = hashmonke_md_final_func(md);
+    const uint8_t *digest = hashmonke_md_final_func(md);
     free((void*)digest);
 }

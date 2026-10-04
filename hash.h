@@ -1,32 +1,41 @@
 #pragma once
 
-#include "algo/md.h"
-#include "file.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
-
-enum hashmonke_hash_code
+enum hashmonke_algo
 {
-    HASHMONKE_HASH_MATCHES,
-    HASHMONKE_HASH_MISMATCH,
-    HASHMONKE_HASH_IO_ERR,
-    HASHMONKE_HASH_MALFORMED,
-    HASHMONKE_HASH_INTERNAL_ERR,
+    HASHMONKE_ALGO_MD5,
+    HASHMONKE_ALGO_SHA1,
+    HASHMONKE_ALGO_SFV
 };
 
-struct hashmonke_hasher;
-typedef void (*hashmonke_hash_progress_cb)(size_t bytes, void *user_data);
+struct hashmonke_hash
+{
+    enum hashmonke_algo algo;
+    uint8_t value[];
+};
 
-struct hashmonke_hasher *hashmonke_hasher_create(void);
-void hashmonke_hasher_free(struct hashmonke_hasher *hasher);
+static inline int hashmonke_hash_size(const struct hashmonke_hash *hash)
+{
+    static const int HASHMONKE_ALGO_SFV_SIZE = 4;
+    static const int HASHMONKE_ALGO_MD5_SIZE = 16;
+    static const int HASHMONKE_ALGO_SHA1_SIZE = 20;
+    switch (hash->algo)
+    {
+    case HASHMONKE_ALGO_MD5: return HASHMONKE_ALGO_MD5_SIZE;
+    case HASHMONKE_ALGO_SHA1: return HASHMONKE_ALGO_SHA1_SIZE;
+    case HASHMONKE_ALGO_SFV: return HASHMONKE_ALGO_SFV_SIZE;
+    default: return -1;
+    }
+}
 
-/** Hash an already-open descriptor from its current position. Ownership of
- * fd and the heap-allocated expected hash is transferred to this call; both
- * are released before return, including error returns. Progress callbacks run
- * on the compute thread after each chunk and are used only until return. */
-enum hashmonke_hash_code hashmonke_hasher_hash(
-    struct hashmonke_hasher *hasher, int fd, char *hash,
-    enum hashmonke_algo algo, hashmonke_hash_progress_cb progress, void *user_data);
-
-size_t hashmonke_hasher_get_last_bytes(struct hashmonke_hasher *hasher);
+static inline bool hashmonke_hash_matches(const struct hashmonke_hash *hash, const uint8_t *other, size_t other_len)
+{
+    int size = hashmonke_hash_size(hash);
+    if (size < 0 || (size_t)size != other_len)
+        return false;
+    return memcmp(hash->value, other, size) == 0;
+}

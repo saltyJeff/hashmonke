@@ -263,12 +263,12 @@ static inline int hashmonke_hex_char_to_val(char c)
     return -1;
 }
 
-static inline char *hashmonke_hex_to_bytes(const char *hex, size_t hex_len, size_t *out_len)
+static inline uint8_t *hashmonke_hex_to_bytes(const char *hex, size_t hex_len, size_t *out_len)
 {
     if (hex_len % 2 != 0)
         return NULL;
     size_t n = hex_len / 2;
-    char *bytes = (char *)malloc(n);
+    uint8_t *bytes = (uint8_t *)malloc(n);
     if (!bytes)
         return NULL;
     for (size_t i = 0; i < n; ++i)
@@ -280,7 +280,7 @@ static inline char *hashmonke_hex_to_bytes(const char *hex, size_t hex_len, size
             free(bytes);
             return NULL;
         }
-        bytes[i] = (char)((hi << 4) | lo);
+        bytes[i] = (uint8_t)((hi << 4) | lo);
     }
     if (out_len)
         *out_len = n;

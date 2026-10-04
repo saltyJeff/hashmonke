@@ -83,12 +83,12 @@ static void crc32_update(struct hashmonke_md *md, const char *data, size_t len)
     c->crc = crc;
 }
 
-static const char *crc32_final(struct hashmonke_md *md)
+static const uint8_t *crc32_final(struct hashmonke_md *md)
 {
     CRC32_CTX *c = (CRC32_CTX *)md->ctx;
     uint32_t final_crc = c->crc ^ 0xFFFFFFFFUL;
 
-    char *out = (char *)malloc(CRC32_DIGEST_LENGTH);
+    uint8_t *out = (uint8_t *)malloc(CRC32_DIGEST_LENGTH);
     if (out)
     {
         CRYPTO_store_u32_be(out, final_crc);

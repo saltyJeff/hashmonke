@@ -201,12 +201,12 @@ static void md5_update(struct hashmonke_md *md, const char *data, size_t len)
     crypto_md32_update(md5_block_data_order, c->h, c->data, MD5_CBLOCK, &c->num, &c->Nh, &c->Nl, (const uint8_t *)data, len);
 }
 
-static const char *md5_final(struct hashmonke_md *md)
+static const uint8_t *md5_final(struct hashmonke_md *md)
 {
     MD5_CTX *c = (MD5_CTX *)md->ctx;
     crypto_md32_final(md5_block_data_order, c->h, c->data, MD5_CBLOCK, &c->num, c->Nh, c->Nl, /*is_big_endian=*/0);
 
-    char *out = (char *)malloc(MD5_DIGEST_LENGTH);
+    uint8_t *out = (uint8_t *)malloc(MD5_DIGEST_LENGTH);
     if (out) {
         CRYPTO_store_u32_le(out, c->h[0]);
         CRYPTO_store_u32_le(out + 4, c->h[1]);

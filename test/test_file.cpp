@@ -23,9 +23,9 @@ TEST_CASE("Manifest entries: SFV paths and CRC32 digests")
     CHECK_EQ(file->format, HASHMONKE_FILE_FORMAT_SFV);
     REQUIRE_EQ(file->num_entries, 2u);
     CHECK(std::string(file->entries[0].file_path).find("alpha.bin") != std::string::npos);
-    CHECK_EQ(file->entries[0].algo, HASHMONKE_ALGO_CRC32);
+    CHECK_EQ(file->entries[0].algo, HASHMONKE_ALGO_SFV);
     CHECK_EQ(to_hex(file->entries[0].hash, 4), "352441c2");
-    CHECK(file->entries[0].text_mode);
+    CHECK_FALSE(file->entries[0].text_mode);
     CHECK(std::string(file->entries[1].file_path).find("folder item.bin") != std::string::npos);
     hashmonke_file_free(file);
     std::remove(path.c_str());
@@ -140,3 +140,25 @@ TEST_CASE("Manifest entries: folder override resolves relative file paths")
     hashmonke_file_free(file);
     std::remove(path.c_str());
 }
+
+TEST_CASE("Manifest entries: dynamic array growth handles variable counts")
+{
+    const std::string path = "test_entries_growth.sfv";
+    std::string content;
+    for (int i = 0; i < 65; ++i)
+    {
+        content += "file" + std::to_string(i) + ".bin 352441c2\n";
+    }
+    write_manifest(path, content);
+    struct hashmonke_file *file = hashmonke_file_init(nullptr, path.c_str(), HASHMONKE_FILE_FORMAT_SFV);
+    REQUIRE(file != nullptr);
+    CHECK_EQ(file->num_entries, 65u);
+    for (size_t i = 0; i < 65; ++i)
+    {
+        CHECK_EQ(file->entries[i].code, HASHMONKE_ENTRY_OK);
+        CHECK_EQ(file->entries[i].algo, HASHMONKE_ALGO_SFV);
+    }
+    hashmonke_file_free(file);
+    std::remove(path.c_str());
+}
+

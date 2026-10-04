@@ -263,12 +263,12 @@ static void sha1_update(struct hashmonke_md *md, const char *data, size_t len)
     crypto_md32_update(sha1_block_data_order, c->h, c->data, SHA_CBLOCK, &c->num, &c->Nh, &c->Nl, (const uint8_t *)data, len);
 }
 
-static const char *sha1_final(struct hashmonke_md *md)
+static const uint8_t *sha1_final(struct hashmonke_md *md)
 {
     SHA_CTX *c = (SHA_CTX *)md->ctx;
     crypto_md32_final(sha1_block_data_order, c->h, c->data, SHA_CBLOCK, &c->num, c->Nh, c->Nl, /*is_big_endian=*/1);
 
-    char *out = (char *)malloc(SHA_DIGEST_LENGTH);
+    uint8_t *out = (uint8_t *)malloc(SHA_DIGEST_LENGTH);
     if (out) {
         CRYPTO_store_u32_be(out, c->h[0]);
         CRYPTO_store_u32_be(out + 4, c->h[1]);

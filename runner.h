@@ -2,6 +2,7 @@
 
 #include "file.h"
 #include "hash.h"
+#include "hasher.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

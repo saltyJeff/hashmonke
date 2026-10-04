@@ -48,7 +48,7 @@ bool hashmonke_parse_gnu(const char *line, const char *base_dir, struct hashmonk
         return false;
 
     size_t out_len = 0;
-    char *bytes = hashmonke_hex_to_bytes(hex_start, hex_len, &out_len);
+    uint8_t *bytes = hashmonke_hex_to_bytes(hex_start, hex_len, &out_len);
     if (!bytes)
     {
         free(abs_path);

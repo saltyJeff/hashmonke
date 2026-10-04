@@ -24,7 +24,7 @@ TEST_CASE("CRC32 Streaming Updates")
     {
         hashmonke_md_update_func(md, &c, 1);
     }
-    const char *digest = hashmonke_md_final_func(md);
+    const uint8_t *digest = hashmonke_md_final_func(md);
     std::string hex = to_hex(digest, 4);
     free((void *)digest);
 
@@ -39,7 +39,7 @@ TEST_CASE("CRC32 Large Payload (1 million 'a's)")
     {
         hashmonke_md_update_func(md, chunk.data(), chunk.size());
     }
-    const char *digest = hashmonke_md_final_func(md);
+    const uint8_t *digest = hashmonke_md_final_func(md);
     std::string hex = to_hex(digest, 4);
     free((void *)digest);
 
@@ -51,6 +51,6 @@ TEST_CASE("CRC32 Interface properties")
     struct hashmonke_md *md = hashmonke_md_crc32();
     CHECK_EQ(hashmonke_md_digest_size(md), 4u);
 
-    const char *digest = hashmonke_md_final_func(md);
+    const uint8_t *digest = hashmonke_md_final_func(md);
     free((void *)digest);
 }

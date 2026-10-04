@@ -48,7 +48,7 @@ inline std::string hash_string(struct hashmonke_md *md, const std::string &input
         return "";
     size_t dsize = hashmonke_md_digest_size(md);
     hashmonke_md_update_func(md, input.data(), input.size());
-    const char *digest = hashmonke_md_final_func(md);
+    const uint8_t *digest = hashmonke_md_final_func(md);
     std::string hex = to_hex(digest, dsize);
     free((void *)digest);
     return hex;

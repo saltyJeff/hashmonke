@@ -27,13 +27,13 @@ bool hashmonke_parse_bsd(const char *line, const char *base_dir, struct hashmonk
     }
     else if (strncasecmp(p, "CRC32", 5) == 0 && (p[5] == ' ' || p[5] == '('))
     {
-        algo = HASHMONKE_ALGO_CRC32;
+        algo = HASHMONKE_ALGO_SFV;
         expected_hex_len = 8;
         p += 5;
     }
     else if (strncasecmp(p, "SFV", 3) == 0 && (p[3] == ' ' || p[3] == '('))
     {
-        algo = HASHMONKE_ALGO_CRC32;
+        algo = HASHMONKE_ALGO_SFV;
         expected_hex_len = 8;
         p += 3;
     }
@@ -86,7 +86,7 @@ bool hashmonke_parse_bsd(const char *line, const char *base_dir, struct hashmonk
         return false;
 
     size_t out_len = 0;
-    char *bytes = hashmonke_hex_to_bytes(hex, expected_hex_len, &out_len);
+    uint8_t *bytes = hashmonke_hex_to_bytes(hex, expected_hex_len, &out_len);
     if (!bytes)
     {
         free(abs_path);
@@ -95,7 +95,7 @@ bool hashmonke_parse_bsd(const char *line, const char *base_dir, struct hashmonk
 
     entry->hash = bytes;
     entry->file_path = abs_path;
-    entry->text_mode = true;
+    entry->text_mode = false;
     entry->algo = algo;
     return true;
 }

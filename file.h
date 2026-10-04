@@ -1,6 +1,8 @@
 #pragma once
+#include "hash.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 
 enum hashmonke_file_format
@@ -9,14 +11,6 @@ enum hashmonke_file_format
     HASHMONKE_FILE_FORMAT_GNU_MD5,
     HASHMONKE_FILE_FORMAT_BSD,
     HASHMONKE_FILE_FORMAT_AUTODETECT
-};
-
-enum hashmonke_algo
-{
-    HASHMONKE_ALGO_MD5,
-    HASHMONKE_ALGO_SHA1,
-    HASHMONKE_ALGO_CRC32,
-    HASHMONKE_ALGO_SFV = HASHMONKE_ALGO_CRC32
 };
 
 enum hashmonke_entry_code
@@ -29,7 +23,7 @@ struct hashmonke_file_entry
 {
     const char *file_path;
     // Hash bytes converted from ASCII; size is determined by algo.
-    const char *hash;
+    uint8_t *hash;
     enum hashmonke_algo algo;
     enum hashmonke_entry_code code;
     bool text_mode;

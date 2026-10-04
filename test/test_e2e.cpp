@@ -1,8 +1,10 @@
-#include "cli.h"
 #include "doctest.h"
+extern "C" {
+#include "cli.h"
 #include "file.h"
 #include "hash.h"
 #include "runner.h"
+}
 #include "test_utils.hpp"
 #include <chrono>
 #include <cstdio>
@@ -40,7 +42,7 @@ TEST_CASE("E2E: Realistic SFV archive verification")
 
     struct hashmonke_file *manifest = hashmonke_file_init(nullptr, "e2e_archive.sfv", HASHMONKE_FILE_FORMAT_AUTODETECT);
     REQUIRE(manifest != nullptr);
-    CHECK_EQ(hashmonke_file_get_format(manifest), HASHMONKE_FILE_FORMAT_SFV);
+    CHECK_EQ(manifest->format, HASHMONKE_FILE_FORMAT_SFV);
 
     struct hashmonke_runner *runner = hashmonke_runner_run(manifest, [](const char *path, enum hashmonke_hash_code code) {
         (void)path;
@@ -87,7 +89,7 @@ TEST_CASE("E2E: Realistic GNU MD5 archive with mixed status")
 
     struct hashmonke_file *manifest = hashmonke_file_init(nullptr, "e2e_checksums.md5", HASHMONKE_FILE_FORMAT_AUTODETECT);
     REQUIRE(manifest != nullptr);
-    CHECK_EQ(hashmonke_file_get_format(manifest), HASHMONKE_FILE_FORMAT_GNU_MD5);
+    CHECK_EQ(manifest->format, HASHMONKE_FILE_FORMAT_GNU_MD5);
 
     struct hashmonke_runner *runner = hashmonke_runner_run(manifest, nullptr);
     REQUIRE(runner != nullptr);
