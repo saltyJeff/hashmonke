@@ -1,22 +1,88 @@
 #include "runner.h"
-#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 
-static uint32_t get_logical_cores(void)
-{
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    return si.dwNumberOfProcessors > 0 ? (uint32_t)si.dwNumberOfProcessors : 4u;
-}
+#define WINDOW_DURATION_SEC 1.0
+#define EVENT_POLL_TIMEOUT_MS 30
+#define EVENT_QUEUE_CAP 1024
 
-static void runner_sleep_ms(uint32_t ms)
+struct hashmonke_runner;
+
+struct worker
 {
-    Sleep(ms);
-}
+    struct hashmonke_runner *runner;
+    HANDLE thread;
+    HANDLE work_event;
+    struct hashmonke_file_entry *entry;
+    size_t entry_idx;
+    double start_time;
+    struct hashmonke_hash_ctrl ctrl;
+    bool busy;
+    bool terminate;
+};
+
+struct event_msg
+{
+    enum hashmonke_runner_event_type type;
+    size_t entry_idx;
+    uint64_t bytes_chunk;
+    uint64_t bytes_hashed;
+    uint64_t bytes_total;
+    enum hashmonke_hash_code status;
+    struct worker *worker;
+};
+
+enum tuner_state
+{
+    STATE_SETTLING,
+    STATE_EVALUATE,
+    STATE_LOCKED
+};
+
+struct hashmonke_runner
+{
+    struct hashmonke_file *file;
+    hashmonke_runner_cb cb;
+    hashmonke_runner_event_cb event_cb;
+    struct hashmonke_runner_event_context *event_ctx;
+    bool thread_warmup;
+    double start_time;
+
+    uint32_t max_workers;
+    uint32_t spawned_workers;
+    uint32_t active_workers;
+    uint32_t target_workers;
+    size_t next_entry_idx;
+
+    // Hill climber state
+    enum tuner_state hc_state;
+    int hc_direction;
+    uint32_t hc_reversals;
+    double hc_prev_rate;
+    double hc_best_rate;
+    uint32_t hc_best_workers;
+
+    bool interrupted;
+    HANDLE notify_event;
+    HANDLE loop_thread;
+
+    struct worker *workers;
+
+    // Ring-buffer event queue from workers
+    CRITICAL_SECTION queue_lock;
+    struct event_msg queue[EVENT_QUEUE_CAP];
+    uint32_t queue_head;
+    uint32_t queue_tail;
+    uint32_t queue_count;
+
+    // Published stats for external readers
+    CRITICAL_SECTION stats_lock;
+    struct hashmonke_runner_stats stats;
+    struct hashmonke_runner_stats published_stats;
+};
 
 static double runner_monotonic_seconds(void)
 {
@@ -32,586 +98,372 @@ static double runner_monotonic_seconds(void)
     return (double)now.QuadPart / (double)freq.QuadPart;
 }
 
-#define WINDOW_DURATION_SEC 1.0
-#define SLEEP_SLICE_MS 50
-
-struct hashmonke_runner
+static uint32_t get_default_max_workers(void)
 {
-    struct hashmonke_file *file;
-    hashmonke_runner_cb cb;
-    CRITICAL_SECTION cb_lock;
-
-    hashmonke_runner_event_cb event_cb;
-    struct hashmonke_runner_event_context *event_ctx;
-    CRITICAL_SECTION event_lock;
-
-    _Atomic size_t next_entry_idx;
-    _Atomic uint64_t total_bytes_hashed;
-    _Atomic uint32_t active_workers;
-    _Atomic uint32_t current_hash_workers;
-    _Atomic uint32_t min_hash_workers;
-    _Atomic uint32_t max_hash_workers;
-    _Atomic uint32_t target_workers;
-    _Atomic uint32_t files_matched;
-    _Atomic uint32_t files_failed;
-    _Atomic uint32_t files_missing;
-    _Atomic uint32_t files_malformed;
-    _Atomic uint32_t total_files_processed;
-    _Atomic bool interrupted;
-    _Atomic bool manifest_eof;
-    _Atomic bool fatal_error;
-    _Atomic bool is_finished;
-    _Atomic uint32_t retirement_requests;
-
-    _Atomic double current_throughput_mb_s;
-    _Atomic double min_throughput_mb_s;
-    _Atomic double max_throughput_mb_s;
-
-    HANDLE coordinator_thread;
-    HANDLE *worker_threads;
-    uint32_t max_workers;
-    uint32_t total_workers_spawned;
-    bool thread_warmup;
-    CRITICAL_SECTION thread_mgmt_lock;
-    CRITICAL_SECTION join_lock;
-    bool coordinator_joined;
-};
-
-static void record_hash_worker_count(struct hashmonke_runner *runner, uint32_t count)
-{
-    uint32_t observed = atomic_load(&runner->max_hash_workers);
-    while (count > observed &&
-           !atomic_compare_exchange_weak(&runner->max_hash_workers, &observed, count))
-    {
-    }
-
-    observed = atomic_load(&runner->min_hash_workers);
-    while (count < observed &&
-           !atomic_compare_exchange_weak(&runner->min_hash_workers, &observed, count))
-    {
-    }
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    uint32_t cores = si.dwNumberOfProcessors > 0 ? (uint32_t)si.dwNumberOfProcessors : 4u;
+    return cores > 16 ? 16 : cores;
 }
 
-struct runner_hasher_worker_ctx
+static void update_throughput(struct hashmonke_runner_stats *st, double mb_s)
 {
-    struct hashmonke_runner *runner;
-    size_t line_number;
-    size_t entry_index;
-    const char *file_path;
-    const char *display_path;
-    double start_time;
-};
+    if (mb_s <= 0.0)
+        return;
+    st->current_throughput_mb_s = mb_s;
+    if (st->min_throughput_mb_s <= 0.0 || mb_s < st->min_throughput_mb_s)
+        st->min_throughput_mb_s = mb_s;
+    if (mb_s > st->max_throughput_mb_s)
+        st->max_throughput_mb_s = mb_s;
+}
 
-static void runner_hasher_progress_callback(
-    const struct hashmonke_hasher_progress_event *pe,
-    struct hashmonke_hasher_progress_context *ctx)
+static void emit_event(struct hashmonke_runner *runner, enum hashmonke_runner_event_type type,
+                       const struct hashmonke_file_entry *entry, size_t entry_idx,
+                       enum hashmonke_hash_code status, uint64_t bytes, uint64_t total, double mb_s)
 {
-    struct runner_hasher_worker_ctx *wctx = (struct runner_hasher_worker_ctx *)ctx;
-    if (!wctx || !wctx->runner || !wctx->runner->event_cb)
+    if (!runner->event_cb)
         return;
 
-    double now = runner_monotonic_seconds();
-    double elapsed = now - wctx->start_time;
-    double mb_s = 0.0;
-    if (elapsed > 0.0)
-        mb_s = ((double)pe->bytes_hashed / (1024.0 * 1024.0)) / elapsed;
-
-    struct hashmonke_runner_event ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type = HASHMONKE_RUNNER_EVENT_PROGRESS;
-    ev.line_number = wctx->line_number;
-    ev.entry_index = wctx->entry_index;
-    ev.file_path = wctx->file_path;
-    ev.display_path = wctx->display_path;
-    ev.bytes_processed = pe->bytes_hashed;
-    ev.file_size = pe->bytes_total;
-    ev.throughput_mb_s = mb_s;
-
-    EnterCriticalSection(&wctx->runner->event_lock);
-    wctx->runner->event_cb(&ev, wctx->runner->event_ctx);
-    LeaveCriticalSection(&wctx->runner->event_lock);
+    const char *path = entry && entry->file_path ? entry->file_path : "<malformed>";
+    struct hashmonke_runner_event ev = {
+        .type = type,
+        .line_number = entry ? entry->line_number : 0,
+        .entry_index = entry_idx,
+        .file_path = path,
+        .display_path = entry && entry->display_path ? entry->display_path : path,
+        .status = status,
+        .bytes_processed = bytes,
+        .file_size = total,
+        .throughput_mb_s = mb_s,
+    };
+    runner->event_cb(&ev, runner->event_ctx);
 }
 
-static DWORD WINAPI worker_func(LPVOID arg)
+static void push_event(struct hashmonke_runner *runner, const struct event_msg *msg)
 {
-    struct hashmonke_runner *runner = (struct hashmonke_runner *)arg;
-    struct hashmonke_hasher *hasher = hashmonke_hasher_create();
-
-    if (!hasher)
+    EnterCriticalSection(&runner->queue_lock);
+    if (runner->queue_count < EVENT_QUEUE_CAP)
     {
-        atomic_store(&runner->fatal_error, true);
-        atomic_store(&runner->interrupted, true);
-        atomic_fetch_sub(&runner->active_workers, 1);
-        return 0;
+        runner->queue[runner->queue_tail] = *msg;
+        runner->queue_tail = (runner->queue_tail + 1) % EVENT_QUEUE_CAP;
+        runner->queue_count++;
     }
+    LeaveCriticalSection(&runner->queue_lock);
 
-    while (!atomic_load(&runner->interrupted))
+    SetEvent(runner->notify_event);
+}
+
+static void worker_progress_callback(const struct hashmonke_hasher_progress_event *pe,
+                                     struct hashmonke_hasher_progress_context *ctx)
+{
+    struct worker *w = (struct worker *)ctx;
+    if (!w || !w->runner)
+        return;
+
+    struct event_msg msg = {
+        .type = HASHMONKE_RUNNER_EVENT_PROGRESS,
+        .entry_idx = w->entry_idx,
+        .bytes_chunk = pe->bytes_chunk,
+        .bytes_hashed = pe->bytes_hashed,
+        .bytes_total = pe->bytes_total,
+        .worker = w,
+    };
+    push_event(w->runner, &msg);
+}
+
+static DWORD WINAPI worker_thread_proc(LPVOID arg)
+{
+    struct worker *w = (struct worker *)arg;
+    struct hashmonke_hasher *hasher = hashmonke_hasher_create();
+    if (!hasher)
+        return 1;
+
+    while (true)
     {
-        // Claim one retirement request so each target reduction retires one worker.
-        uint32_t requests = atomic_load(&runner->retirement_requests);
-        while (requests > 0 &&
-               !atomic_compare_exchange_weak(&runner->retirement_requests, &requests, requests - 1))
-        {
-        }
-        if (requests > 0)
+        WaitForSingleObject(w->work_event, INFINITE);
+        if (w->terminate)
             break;
 
-        size_t entry_idx = atomic_fetch_add(&runner->next_entry_idx, 1);
-        if (entry_idx >= runner->file->num_entries)
-        {
-            atomic_store(&runner->manifest_eof, true);
-            break;
-        }
-
-        struct hashmonke_file_entry *entry = &runner->file->entries[entry_idx];
-
-        if (entry->code != HASHMONKE_ENTRY_OK)
-        {
-            atomic_fetch_add(&runner->files_malformed, 1);
-            atomic_fetch_add(&runner->total_files_processed, 1);
-
-            const char *path = entry->file_path ? entry->file_path : "<malformed>";
-            const char *disp = entry->display_path ? entry->display_path : "<malformed>";
-
-            if (runner->event_cb)
-            {
-                struct hashmonke_runner_event ev;
-                memset(&ev, 0, sizeof(ev));
-                ev.type = HASHMONKE_RUNNER_EVENT_START;
-                ev.line_number = entry->line_number;
-                ev.entry_index = entry_idx;
-                ev.file_path = path;
-                ev.display_path = disp;
-                ev.status = HASHMONKE_HASH_MALFORMED;
-                EnterCriticalSection(&runner->event_lock);
-                runner->event_cb(&ev, runner->event_ctx);
-                LeaveCriticalSection(&runner->event_lock);
-
-                ev.type = HASHMONKE_RUNNER_EVENT_COMPLETE;
-                EnterCriticalSection(&runner->event_lock);
-                runner->event_cb(&ev, runner->event_ctx);
-                LeaveCriticalSection(&runner->event_lock);
-            }
-
-            if (runner->cb)
-            {
-                EnterCriticalSection(&runner->cb_lock);
-                runner->cb(path, HASHMONKE_HASH_MALFORMED);
-                LeaveCriticalSection(&runner->cb_lock);
-            }
-            continue;
-        }
-
-        const char *path = entry->file_path;
-        const char *disp = entry->display_path ? entry->display_path : entry->file_path;
-        double file_start_time = runner_monotonic_seconds();
-
-        if (runner->event_cb)
-        {
-            struct hashmonke_runner_event ev;
-            memset(&ev, 0, sizeof(ev));
-            ev.type = HASHMONKE_RUNNER_EVENT_START;
-            ev.line_number = entry->line_number;
-            ev.entry_index = entry_idx;
-            ev.file_path = path;
-            ev.display_path = disp;
-            EnterCriticalSection(&runner->event_lock);
-            runner->event_cb(&ev, runner->event_ctx);
-            LeaveCriticalSection(&runner->event_lock);
-        }
-
-        // HASHMONKE_ENTRY_OK: Execute verification
         uint8_t expected_buf[sizeof(struct hashmonke_hash) + 20];
         struct hashmonke_hash *expected = (struct hashmonke_hash *)expected_buf;
-        expected->algo = entry->algo;
+        expected->algo = w->entry->algo;
         int sz = hashmonke_hash_size(expected);
-        if (sz > 0 && entry->hash)
-        {
-            memcpy(expected->value, entry->hash, (size_t)sz);
-        }
+        if (sz > 0 && w->entry->hash)
+            memcpy(expected->value, w->entry->hash, (size_t)sz);
 
-        struct runner_hasher_worker_ctx wctx;
-        wctx.runner = runner;
-        wctx.line_number = entry->line_number;
-        wctx.entry_index = entry_idx;
-        wctx.file_path = path;
-        wctx.display_path = disp;
-        wctx.start_time = file_start_time;
+        memset(&w->ctrl, 0, sizeof(w->ctrl));
+        atomic_store(&w->ctrl.cancel, w->runner->interrupted);
+        w->ctrl.progress_cb = worker_progress_callback;
+        w->ctrl.progress_context = (struct hashmonke_hasher_progress_context *)w;
 
-        struct hashmonke_hash_ctrl ctrl;
-        memset(&ctrl, 0, sizeof(ctrl));
-        atomic_store(&ctrl.cancel, atomic_load(&runner->interrupted));
-        if (runner->event_cb)
-        {
-            ctrl.progress_cb = runner_hasher_progress_callback;
-            ctrl.progress_context = (struct hashmonke_hasher_progress_context *)&wctx;
-        }
+        enum hashmonke_hash_code code = hashmonke_hasher_hash(
+            hasher, w->entry->file_path, w->entry->text_mode, expected, &w->ctrl);
 
-        uint32_t hashing_workers = atomic_fetch_add(&runner->current_hash_workers, 1) + 1;
-        record_hash_worker_count(runner, hashing_workers);
-
-        enum hashmonke_hash_code hcode = hashmonke_hasher_hash(
-            hasher, entry->file_path, entry->text_mode, expected, &ctrl);
-
-        uint32_t remaining_hash_workers = atomic_fetch_sub(&runner->current_hash_workers, 1) - 1;
-        if (remaining_hash_workers > 0)
-            record_hash_worker_count(runner, remaining_hash_workers);
-
-        atomic_fetch_add(&runner->total_bytes_hashed, atomic_load(&ctrl.bytes_hashed));
-
-        if (hcode == HASHMONKE_HASH_INTERRUPTED)
-        {
-            break;
-        }
-
-        atomic_fetch_add(&runner->total_files_processed, 1);
-
-        if (runner->event_cb)
-        {
-            double now = runner_monotonic_seconds();
-            double elapsed = now - file_start_time;
-            uint64_t b_done = atomic_load(&ctrl.bytes_hashed);
-            double mb_s = (elapsed > 0.0) ? ((double)b_done / (1024.0 * 1024.0)) / elapsed : 0.0;
-
-            struct hashmonke_runner_event ev;
-            memset(&ev, 0, sizeof(ev));
-            ev.type = HASHMONKE_RUNNER_EVENT_COMPLETE;
-            ev.line_number = entry->line_number;
-            ev.entry_index = entry_idx;
-            ev.file_path = path;
-            ev.display_path = disp;
-            ev.status = hcode;
-            ev.bytes_processed = b_done;
-            ev.file_size = atomic_load(&ctrl.bytes_total);
-            ev.throughput_mb_s = mb_s;
-
-            EnterCriticalSection(&runner->event_lock);
-            runner->event_cb(&ev, runner->event_ctx);
-            LeaveCriticalSection(&runner->event_lock);
-        }
-
-        if (hcode == HASHMONKE_HASH_INTERNAL_ERR)
-        {
-            atomic_store(&runner->fatal_error, true);
-            atomic_store(&runner->interrupted, true);
-            if (runner->cb)
-            {
-                EnterCriticalSection(&runner->cb_lock);
-                runner->cb(entry->file_path, hcode);
-                LeaveCriticalSection(&runner->cb_lock);
-            }
-            break;
-        }
-
-        if (hcode == HASHMONKE_HASH_MATCHES)
-        {
-            atomic_fetch_add(&runner->files_matched, 1);
-        }
-        else if (hcode == HASHMONKE_HASH_MISMATCH)
-        {
-            atomic_fetch_add(&runner->files_failed, 1);
-        }
-        else
-        {
-            atomic_fetch_add(&runner->files_missing, 1);
-        }
-
-        if (runner->cb)
-        {
-            EnterCriticalSection(&runner->cb_lock);
-            runner->cb(entry->file_path, hcode);
-            LeaveCriticalSection(&runner->cb_lock);
-        }
+        struct event_msg msg = {
+            .type = HASHMONKE_RUNNER_EVENT_COMPLETE,
+            .entry_idx = w->entry_idx,
+            .bytes_hashed = atomic_load(&w->ctrl.bytes_hashed),
+            .bytes_total = atomic_load(&w->ctrl.bytes_total),
+            .status = code,
+            .worker = w,
+        };
+        push_event(w->runner, &msg);
     }
 
-    if (hasher)
-    {
-        hashmonke_hasher_free(hasher);
-    }
-    atomic_fetch_sub(&runner->active_workers, 1);
+    hashmonke_hasher_free(hasher);
     return 0;
 }
 
-static bool spawn_worker(struct hashmonke_runner *runner)
+static struct worker *spawn_worker(struct hashmonke_runner *runner)
 {
-    EnterCriticalSection(&runner->thread_mgmt_lock);
-    if (runner->total_workers_spawned >= runner->max_workers)
+    if (runner->spawned_workers >= runner->max_workers)
+        return NULL;
+
+    struct worker *w = &runner->workers[runner->spawned_workers];
+    memset(w, 0, sizeof(*w));
+    w->runner = runner;
+    w->work_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (!w->work_event)
+        return NULL;
+
+    w->thread = CreateThread(NULL, 0, worker_thread_proc, w, 0, NULL);
+    if (!w->thread)
     {
-        LeaveCriticalSection(&runner->thread_mgmt_lock);
-        return false;
+        CloseHandle(w->work_event);
+        return NULL;
     }
 
-    atomic_fetch_add(&runner->active_workers, 1);
-    HANDLE thread = CreateThread(NULL, 0, worker_func, runner, 0, NULL);
-    if (!thread)
-    {
-        atomic_fetch_sub(&runner->active_workers, 1);
-        atomic_store(&runner->fatal_error, true);
-        atomic_store(&runner->interrupted, true);
-        LeaveCriticalSection(&runner->thread_mgmt_lock);
-        return false;
-    }
-
-    runner->worker_threads[runner->total_workers_spawned++] = thread;
-    LeaveCriticalSection(&runner->thread_mgmt_lock);
-    return true;
+    runner->spawned_workers++;
+    return w;
 }
 
-enum tuner_state
+static void hill_climber_step(struct hashmonke_runner *r, double rate)
 {
-    STATE_SETTLING,
-    STATE_EVALUATE,
-    STATE_LOCKED
-};
-
-static DWORD WINAPI coordinator_func(LPVOID arg)
-{
-    struct hashmonke_runner *runner = (struct hashmonke_runner *)arg;
-
-    // Start with the requested worker count.
-    uint32_t initial_workers = atomic_load(&runner->target_workers);
-    for (uint32_t i = 0; i < initial_workers; ++i)
-        spawn_worker(runner);
-
-    enum tuner_state state = runner->thread_warmup ? STATE_SETTLING : STATE_LOCKED;
-    int direction = +1;          // +1 = increasing workers, -1 = decreasing workers
-    uint32_t reversals = 0;       // Direction changes; capped at 3
-    double prev_rate = 0.0;
-    double best_rate = 0.0;
-    uint32_t best_workers = initial_workers;
-
-    while (!atomic_load(&runner->interrupted))
+    if (r->hc_state == STATE_SETTLING)
     {
-        if (atomic_load(&runner->manifest_eof) && atomic_load(&runner->active_workers) == 0)
+        r->hc_state = STATE_EVALUATE;
+        return;
+    }
+    if (r->hc_state != STATE_EVALUATE)
+        return;
+
+    if (rate > r->hc_best_rate)
+    {
+        r->hc_best_rate = rate;
+        r->hc_best_workers = r->active_workers;
+    }
+
+    if (r->hc_prev_rate <= 0.0)
+    {
+        r->hc_prev_rate = rate;
+        if (r->target_workers < r->max_workers)
         {
+            r->target_workers++;
+            r->hc_direction = 1;
+            r->hc_state = STATE_SETTLING;
+        }
+        else
+            r->hc_state = STATE_LOCKED;
+        return;
+    }
+
+    bool up = (r->hc_direction > 0);
+    bool ok = up ? (rate >= r->hc_prev_rate * 1.05) : (rate >= r->hc_prev_rate * 0.98);
+    r->hc_prev_rate = rate;
+
+    if (ok)
+    {
+        uint32_t next = r->target_workers + (up ? 1 : -1);
+        if (next >= 1 && next <= r->max_workers)
+        {
+            r->target_workers = next;
+            r->hc_state = STATE_SETTLING;
+        }
+        else
+            r->hc_state = STATE_LOCKED;
+    }
+    else if (++r->hc_reversals >= 3)
+    {
+        r->target_workers = r->hc_best_workers;
+        r->hc_state = STATE_LOCKED;
+    }
+    else
+    {
+        r->hc_direction = -r->hc_direction;
+        uint32_t next = r->target_workers + r->hc_direction;
+        r->target_workers = (next < 1) ? 1 : (next > r->max_workers ? r->max_workers : next);
+        r->hc_state = STATE_SETTLING;
+    }
+}
+
+static void process_events(struct hashmonke_runner *runner)
+{
+    struct event_msg batch[64];
+    while (true)
+    {
+        uint32_t count = 0;
+        EnterCriticalSection(&runner->queue_lock);
+        while (runner->queue_count > 0 && count < 64)
+        {
+            batch[count++] = runner->queue[runner->queue_head];
+            runner->queue_head = (runner->queue_head + 1) % EVENT_QUEUE_CAP;
+            runner->queue_count--;
+        }
+        LeaveCriticalSection(&runner->queue_lock);
+
+        if (count == 0)
             break;
-        }
 
-        // Measure a window
-        uint64_t bytes_start = atomic_load(&runner->total_bytes_hashed);
-        double window_start = runner_monotonic_seconds();
-        while (runner_monotonic_seconds() - window_start < WINDOW_DURATION_SEC)
+        for (uint32_t i = 0; i < count; ++i)
         {
-            if (atomic_load(&runner->interrupted))
-                break;
-            if (atomic_load(&runner->manifest_eof) && atomic_load(&runner->active_workers) == 0)
-                break;
-            runner_sleep_ms(SLEEP_SLICE_MS);
-        }
+            struct event_msg *m = &batch[i];
+            struct hashmonke_file_entry *entry = &runner->file->entries[m->entry_idx];
+            double elapsed = runner_monotonic_seconds() - m->worker->start_time;
+            double mb_s = (elapsed > 0.0) ? ((double)m->bytes_hashed / (1024.0 * 1024.0)) / elapsed : 0.0;
 
-        double elapsed_sec = runner_monotonic_seconds() - window_start;
-        if (elapsed_sec <= 0.0)
-            elapsed_sec = 0.001;
-        uint64_t bytes_end = atomic_load(&runner->total_bytes_hashed);
-        uint64_t window_bytes = (bytes_end >= bytes_start) ? (bytes_end - bytes_start) : 0;
-        double current_rate = (elapsed_sec > 0.0) ? ((double)window_bytes / elapsed_sec) : 0.0;
-        double throughput_mb_s = current_rate / (1024.0 * 1024.0);
-        atomic_store(&runner->current_throughput_mb_s, throughput_mb_s);
-        if (throughput_mb_s > 0.0)
-        {
-            double cur_min = atomic_load(&runner->min_throughput_mb_s);
-            while ((cur_min <= 0.0 || throughput_mb_s < cur_min) &&
-                   !atomic_compare_exchange_weak(&runner->min_throughput_mb_s, &cur_min, throughput_mb_s))
+            if (m->type == HASHMONKE_RUNNER_EVENT_PROGRESS)
             {
+                runner->stats.total_bytes_hashed += m->bytes_chunk;
+                emit_event(runner, HASHMONKE_RUNNER_EVENT_PROGRESS, entry, m->entry_idx, 0, m->bytes_hashed, m->bytes_total, mb_s);
             }
-            double cur_max = atomic_load(&runner->max_throughput_mb_s);
-            while (throughput_mb_s > cur_max &&
-                   !atomic_compare_exchange_weak(&runner->max_throughput_mb_s, &cur_max, throughput_mb_s))
+            else
             {
+                m->worker->busy = false;
+                runner->active_workers--;
+                runner->stats.total_files_processed++;
+
+                if (m->status == HASHMONKE_HASH_MATCHES)
+                    runner->stats.files_matched++;
+                else if (m->status == HASHMONKE_HASH_IO_ERR)
+                    runner->stats.files_missing++;
+                else if (m->status == HASHMONKE_HASH_MALFORMED)
+                    runner->stats.files_malformed++;
+                else
+                    runner->stats.files_failed++;
+
+                emit_event(runner, HASHMONKE_RUNNER_EVENT_COMPLETE, entry, m->entry_idx, m->status, m->bytes_hashed, m->bytes_total, mb_s);
+                if (runner->cb)
+                    runner->cb(entry->file_path ? entry->file_path : "<unknown>", m->status);
             }
         }
+    }
+}
 
-        if (atomic_load(&runner->manifest_eof) || atomic_load(&runner->interrupted))
+static void dispatch_workers(struct hashmonke_runner *runner)
+{
+    while (runner->active_workers < runner->target_workers &&
+           runner->next_entry_idx < runner->file->num_entries &&
+           !runner->interrupted)
+    {
+        size_t idx = runner->next_entry_idx++;
+        struct hashmonke_file_entry *entry = &runner->file->entries[idx];
+        if (entry->code != HASHMONKE_ENTRY_OK)
         {
+            runner->stats.files_malformed++;
+            runner->stats.total_files_processed++;
+            emit_event(runner, HASHMONKE_RUNNER_EVENT_START, entry, idx, HASHMONKE_HASH_MALFORMED, 0, 0, 0.0);
+            emit_event(runner, HASHMONKE_RUNNER_EVENT_COMPLETE, entry, idx, HASHMONKE_HASH_MALFORMED, 0, 0, 0.0);
+            if (runner->cb)
+                runner->cb(entry->file_path ? entry->file_path : "<malformed>", HASHMONKE_HASH_MALFORMED);
             continue;
         }
 
-        switch (state)
+        struct worker *w = NULL;
+        for (uint32_t i = 0; i < runner->spawned_workers; ++i)
         {
-        case STATE_SETTLING:
-            // Discard transitional window after thread count changes; transition to measurement
-            state = STATE_EVALUATE;
-            break;
-
-        case STATE_EVALUATE: {
-            uint32_t current_w = atomic_load(&runner->active_workers);
-
-            // Track all-time best throughput and worker count
-            if (current_rate > best_rate)
+            if (!runner->workers[i].busy)
             {
-                best_rate = current_rate;
-                best_workers = current_w;
-            }
-
-            if (prev_rate <= 0.0)
-            {
-                // First valid measurement: establish baseline and try scaling up
-                prev_rate = current_rate;
-                if (current_w < runner->max_workers && !atomic_load(&runner->manifest_eof))
-                {
-                    atomic_fetch_add(&runner->target_workers, 1);
-                    spawn_worker(runner);
-                    direction = +1;
-                    state = STATE_SETTLING;
-                }
-                else
-                {
-                    state = STATE_LOCKED;
-                }
+                w = &runner->workers[i];
                 break;
             }
-
-            // Decide whether to continue or reverse direction
-            if (direction == +1)
-            {
-                // We scaled up: did throughput improve by at least 5%?
-                if (current_rate >= prev_rate * 1.05)
-                {
-                    // Improved: continue climbing if headroom exists
-                    prev_rate = current_rate;
-                    if (current_w < runner->max_workers && !atomic_load(&runner->manifest_eof))
-                    {
-                        atomic_fetch_add(&runner->target_workers, 1);
-                        spawn_worker(runner);
-                        state = STATE_SETTLING;
-                    }
-                    else
-                    {
-                        state = STATE_LOCKED;
-                    }
-                }
-                else
-                {
-                    // Plateaued or regressed: reverse direction
-                    reversals++;
-                    direction = -1;
-                    prev_rate = current_rate;
-
-                    if (reversals >= 3)
-                    {
-                        // Oscillation limit reached: converge to best observed worker count
-                        if (current_w > best_workers)
-                        {
-                            atomic_store(&runner->target_workers, best_workers);
-                            atomic_fetch_add(&runner->retirement_requests, current_w - best_workers);
-                        }
-                        else if (current_w < best_workers)
-                        {
-                            uint32_t to_add = best_workers - current_w;
-                            atomic_store(&runner->target_workers, best_workers);
-                            for (uint32_t i = 0; i < to_add; ++i)
-                                spawn_worker(runner);
-                        }
-                        state = STATE_LOCKED;
-                    }
-                    else
-                    {
-                        // Step down 1 worker
-                        uint32_t cur_target = atomic_load(&runner->target_workers);
-                        if (cur_target > 1)
-                        {
-                            atomic_store(&runner->target_workers, cur_target - 1);
-                            atomic_fetch_add(&runner->retirement_requests, 1);
-                            state = STATE_SETTLING;
-                        }
-                        else
-                        {
-                            state = STATE_LOCKED;
-                        }
-                    }
-                }
-            }
-            else // direction == -1
-            {
-                // We scaled down: did throughput hold within 2% or improve?
-                if (current_rate >= prev_rate * 0.98)
-                {
-                    // Throughput held or improved with fewer threads: continue reducing
-                    prev_rate = current_rate;
-                    uint32_t cur_target = atomic_load(&runner->target_workers);
-                    if (cur_target > 1)
-                    {
-                        atomic_store(&runner->target_workers, cur_target - 1);
-                        atomic_fetch_add(&runner->retirement_requests, 1);
-                        state = STATE_SETTLING;
-                    }
-                    else
-                    {
-                        state = STATE_LOCKED;
-                    }
-                }
-                else
-                {
-                    // Throughput dropped noticeably: reversing direction back up
-                    reversals++;
-                    direction = +1;
-                    prev_rate = current_rate;
-
-                    if (reversals >= 3)
-                    {
-                        // Oscillation limit reached: converge to best observed worker count
-                        if (current_w > best_workers)
-                        {
-                            atomic_store(&runner->target_workers, best_workers);
-                            atomic_fetch_add(&runner->retirement_requests, current_w - best_workers);
-                        }
-                        else if (current_w < best_workers)
-                        {
-                            uint32_t to_add = best_workers - current_w;
-                            atomic_store(&runner->target_workers, best_workers);
-                            for (uint32_t i = 0; i < to_add; ++i)
-                                spawn_worker(runner);
-                        }
-                        state = STATE_LOCKED;
-                    }
-                    else
-                    {
-                        // Step up 1 worker
-                        if (current_w < runner->max_workers && !atomic_load(&runner->manifest_eof))
-                        {
-                            atomic_fetch_add(&runner->target_workers, 1);
-                            spawn_worker(runner);
-                            state = STATE_SETTLING;
-                        }
-                        else
-                        {
-                            state = STATE_LOCKED;
-                        }
-                    }
-                }
-            }
-            break;
         }
+        if (!w && runner->spawned_workers < runner->max_workers)
+            w = spawn_worker(runner);
 
-        case STATE_LOCKED:
-            // Worker count locked for remainder of run
+        if (w)
+        {
+            w->busy = true;
+            w->entry = entry;
+            w->entry_idx = idx;
+            w->start_time = runner_monotonic_seconds();
+            runner->active_workers++;
+            emit_event(runner, HASHMONKE_RUNNER_EVENT_START, entry, idx, 0, 0, 0, 0.0);
+            SetEvent(w->work_event);
+        }
+        else
+        {
+            runner->next_entry_idx--;
             break;
         }
     }
+}
 
-    // Wait for all active workers to finish
-    while (atomic_load(&runner->active_workers) > 0)
+static DWORD WINAPI loop_thread_proc(LPVOID arg)
+{
+    struct hashmonke_runner *r = (struct hashmonke_runner *)arg;
+    double win_t = runner_monotonic_seconds(), last_sample_t = win_t;
+    uint64_t win_b = 0, last_sample_b = 0;
+
+    while (!r->interrupted)
     {
-        runner_sleep_ms(10);
+        WaitForSingleObject(r->notify_event, EVENT_POLL_TIMEOUT_MS);
+        ResetEvent(r->notify_event);
+
+        process_events(r);
+
+        r->stats.active_workers = r->active_workers;
+        if (r->active_workers > 0)
+        {
+            if (r->active_workers > r->stats.max_hash_workers)
+                r->stats.max_hash_workers = r->active_workers;
+            if (r->stats.min_hash_workers == 0 || r->active_workers < r->stats.min_hash_workers)
+                r->stats.min_hash_workers = r->active_workers;
+        }
+
+        double now = runner_monotonic_seconds();
+        if (now - last_sample_t >= 0.1)
+        {
+            uint64_t sb = (r->stats.total_bytes_hashed >= last_sample_b) ? (r->stats.total_bytes_hashed - last_sample_b) : 0;
+            update_throughput(&r->stats, ((double)sb / (1024.0 * 1024.0)) / (now - last_sample_t));
+            last_sample_t = now;
+            last_sample_b = r->stats.total_bytes_hashed;
+        }
+
+        if (now - win_t >= WINDOW_DURATION_SEC)
+        {
+            uint64_t wb = (r->stats.total_bytes_hashed >= win_b) ? (r->stats.total_bytes_hashed - win_b) : 0;
+            double rate = (now > win_t) ? (double)wb / (now - win_t) : 0.0;
+            update_throughput(&r->stats, rate / (1024.0 * 1024.0));
+            hill_climber_step(r, rate);
+            win_t = now;
+            win_b = r->stats.total_bytes_hashed;
+        }
+
+        dispatch_workers(r);
+
+        if (r->active_workers == 0 && r->next_entry_idx >= r->file->num_entries)
+            break;
+
+        EnterCriticalSection(&r->stats_lock);
+        r->published_stats = r->stats;
+        LeaveCriticalSection(&r->stats_lock);
     }
 
-    // Join all spawned workers
-    EnterCriticalSection(&runner->thread_mgmt_lock);
-    for (uint32_t i = 0; i < runner->total_workers_spawned; ++i)
-    {
-        WaitForSingleObject(runner->worker_threads[i], INFINITE);
-        CloseHandle(runner->worker_threads[i]);
-    }
-    runner->total_workers_spawned = 0;
-    LeaveCriticalSection(&runner->thread_mgmt_lock);
+    double elapsed = runner_monotonic_seconds() - r->start_time;
+    update_throughput(&r->stats, ((double)r->stats.total_bytes_hashed / (1024.0 * 1024.0)) / (elapsed > 0 ? elapsed : 0.001));
+    r->stats.is_finished = true;
+    r->stats.active_workers = 0;
 
-    atomic_store(&runner->is_finished, true);
+    EnterCriticalSection(&r->stats_lock);
+    r->published_stats = r->stats;
+    LeaveCriticalSection(&r->stats_lock);
     return 0;
 }
 
 struct hashmonke_runner *hashmonke_runner_run_with_events(
     struct hashmonke_file *file, hashmonke_runner_cb cb,
-    hashmonke_runner_event_cb event_cb, struct hashmonke_runner_event_context *event_ctx,
+    hashmonke_runner_event_cb event_cb,
+    struct hashmonke_runner_event_context *event_ctx,
     uint32_t starting_workers, bool thread_warmup)
 {
     if (!file)
@@ -626,14 +478,11 @@ struct hashmonke_runner *hashmonke_runner_run_with_events(
     runner->event_cb = event_cb;
     runner->event_ctx = event_ctx;
     runner->thread_warmup = thread_warmup;
-    atomic_store(&runner->min_hash_workers, UINT32_MAX);
+    runner->start_time = runner_monotonic_seconds();
 
-    InitializeCriticalSection(&runner->cb_lock);
-    InitializeCriticalSection(&runner->event_lock);
-    InitializeCriticalSection(&runner->thread_mgmt_lock);
-    InitializeCriticalSection(&runner->join_lock);
-
-    runner->max_workers = get_logical_cores();
+    runner->max_workers = get_default_max_workers();
+    if (starting_workers > runner->max_workers)
+        runner->max_workers = starting_workers;
     if (runner->max_workers < 1)
         runner->max_workers = 1;
     if (runner->max_workers > 128)
@@ -643,28 +492,41 @@ struct hashmonke_runner *hashmonke_runner_run_with_events(
         starting_workers = 1;
     if (starting_workers > runner->max_workers)
         starting_workers = runner->max_workers;
-    atomic_store(&runner->target_workers, starting_workers);
 
-    runner->worker_threads = (HANDLE *)malloc(sizeof(HANDLE) * runner->max_workers);
-    if (!runner->worker_threads)
+    runner->target_workers = starting_workers;
+    runner->hc_state = thread_warmup ? STATE_SETTLING : STATE_LOCKED;
+    runner->hc_direction = 1;
+    runner->hc_best_workers = starting_workers;
+
+    runner->workers = (struct worker *)calloc(runner->max_workers, sizeof(struct worker));
+    if (!runner->workers)
     {
-        DeleteCriticalSection(&runner->join_lock);
-        DeleteCriticalSection(&runner->thread_mgmt_lock);
-        DeleteCriticalSection(&runner->event_lock);
-        DeleteCriticalSection(&runner->cb_lock);
         free(runner);
         return NULL;
     }
 
-    runner->coordinator_thread = CreateThread(NULL, 0, coordinator_func, runner, 0, NULL);
-    if (!runner->coordinator_thread)
+    InitializeCriticalSection(&runner->queue_lock);
+    InitializeCriticalSection(&runner->stats_lock);
+    runner->notify_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (!runner->notify_event)
     {
-        free(runner->worker_threads);
-        DeleteCriticalSection(&runner->join_lock);
-        DeleteCriticalSection(&runner->thread_mgmt_lock);
-        DeleteCriticalSection(&runner->event_lock);
-        DeleteCriticalSection(&runner->cb_lock);
+        DeleteCriticalSection(&runner->stats_lock);
+        DeleteCriticalSection(&runner->queue_lock);
+        free(runner->workers);
         free(runner);
+        return NULL;
+    }
+
+    for (uint32_t i = 0; i < starting_workers; ++i)
+    {
+        if (!spawn_worker(runner))
+            break;
+    }
+
+    runner->loop_thread = CreateThread(NULL, 0, loop_thread_proc, runner, 0, NULL);
+    if (!runner->loop_thread)
+    {
+        hashmonke_runner_free(runner);
         return NULL;
     }
 
@@ -690,48 +552,30 @@ struct hashmonke_runner *hashmonke_runner_run(struct hashmonke_file *file, hashm
 
 void hashmonke_runner_wait(struct hashmonke_runner *runner)
 {
-    if (!runner)
-        return;
-    EnterCriticalSection(&runner->join_lock);
-    if (!runner->coordinator_joined && runner->coordinator_thread)
-    {
-        WaitForSingleObject(runner->coordinator_thread, INFINITE);
-        CloseHandle(runner->coordinator_thread);
-        runner->coordinator_thread = NULL;
-        runner->coordinator_joined = true;
-    }
-    LeaveCriticalSection(&runner->join_lock);
+    if (runner && runner->loop_thread)
+        WaitForSingleObject(runner->loop_thread, INFINITE);
 }
 
 void hashmonke_runner_interrupt(struct hashmonke_runner *runner)
 {
     if (!runner)
         return;
-    atomic_store(&runner->interrupted, true);
+    runner->interrupted = true;
+    for (uint32_t i = 0; i < runner->spawned_workers; ++i)
+        atomic_store(&runner->workers[i].ctrl.cancel, true);
+    SetEvent(runner->notify_event);
 }
 
 struct hashmonke_runner_stats hashmonke_runner_get_stats(struct hashmonke_runner *runner)
 {
-    struct hashmonke_runner_stats stats;
-    memset(&stats, 0, sizeof(stats));
+    struct hashmonke_runner_stats s;
+    memset(&s, 0, sizeof(s));
     if (!runner)
-        return stats;
-
-    stats.total_bytes_hashed = atomic_load(&runner->total_bytes_hashed);
-    stats.active_workers = atomic_load(&runner->active_workers);
-    stats.min_hash_workers = atomic_load(&runner->min_hash_workers);
-    stats.max_hash_workers = atomic_load(&runner->max_hash_workers);
-    stats.files_matched = atomic_load(&runner->files_matched);
-    stats.files_failed = atomic_load(&runner->files_failed);
-    stats.files_missing = atomic_load(&runner->files_missing);
-    stats.files_malformed = atomic_load(&runner->files_malformed);
-    stats.total_files_processed = atomic_load(&runner->total_files_processed);
-    stats.current_throughput_mb_s = atomic_load(&runner->current_throughput_mb_s);
-    stats.min_throughput_mb_s = atomic_load(&runner->min_throughput_mb_s);
-    stats.max_throughput_mb_s = atomic_load(&runner->max_throughput_mb_s);
-    stats.is_finished = atomic_load(&runner->is_finished);
-    stats.has_error = atomic_load(&runner->fatal_error);
-    return stats;
+        return s;
+    EnterCriticalSection(&runner->stats_lock);
+    s = runner->published_stats;
+    LeaveCriticalSection(&runner->stats_lock);
+    return s;
 }
 
 void hashmonke_runner_free(struct hashmonke_runner *runner)
@@ -741,10 +585,22 @@ void hashmonke_runner_free(struct hashmonke_runner *runner)
     hashmonke_runner_interrupt(runner);
     hashmonke_runner_wait(runner);
 
-    DeleteCriticalSection(&runner->cb_lock);
-    DeleteCriticalSection(&runner->event_lock);
-    DeleteCriticalSection(&runner->thread_mgmt_lock);
-    DeleteCriticalSection(&runner->join_lock);
-    free(runner->worker_threads);
+    for (uint32_t i = 0; i < runner->spawned_workers; ++i)
+    {
+        runner->workers[i].terminate = true;
+        SetEvent(runner->workers[i].work_event);
+    }
+    for (uint32_t i = 0; i < runner->spawned_workers; ++i)
+    {
+        WaitForSingleObject(runner->workers[i].thread, INFINITE);
+        CloseHandle(runner->workers[i].thread);
+        CloseHandle(runner->workers[i].work_event);
+    }
+    free(runner->workers);
+
+    CloseHandle(runner->loop_thread);
+    CloseHandle(runner->notify_event);
+    DeleteCriticalSection(&runner->queue_lock);
+    DeleteCriticalSection(&runner->stats_lock);
     free(runner);
 }

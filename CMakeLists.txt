@@ -9,6 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(MSVC)
     add_compile_options(
         $<$<COMPILE_LANGUAGE:C,CXX>:/W4>
+        $<$<COMPILE_LANGUAGE:C,CXX>:/O2>
         $<$<COMPILE_LANGUAGE:C,CXX>:/arch:SSE4.2>
         $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>
         $<$<COMPILE_LANGUAGE:C,CXX>:/D_CRT_SECURE_NO_WARNINGS>

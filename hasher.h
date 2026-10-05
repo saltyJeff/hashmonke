@@ -29,6 +29,7 @@ void hashmonke_hasher_free(struct hashmonke_hasher *hasher);
 struct hashmonke_hasher_progress_event
 {
     const char *file_path;
+    uint64_t bytes_chunk;
     uint64_t bytes_hashed;
     uint64_t bytes_total;
 };

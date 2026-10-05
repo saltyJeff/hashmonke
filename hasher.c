@@ -91,6 +91,7 @@ static DWORD WINAPI compute_worker(LPVOID arg)
                     {
                         struct hashmonke_hasher_progress_event pe;
                         pe.file_path = ctx->ctrl->file_path;
+                        pe.bytes_chunk = len;
                         pe.bytes_hashed = atomic_load(&ctx->ctrl->bytes_hashed);
                         pe.bytes_total = atomic_load(&ctx->ctrl->bytes_total);
                         ctx->ctrl->progress_cb(&pe, ctx->ctrl->progress_context);
@@ -200,6 +201,7 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
         {
             struct hashmonke_hasher_progress_event pe;
             pe.file_path = file_path;
+            pe.bytes_chunk = 0;
             pe.bytes_hashed = 0;
             pe.bytes_total = atomic_load(&ctrl->bytes_total);
             ctrl->progress_cb(&pe, ctrl->progress_context);

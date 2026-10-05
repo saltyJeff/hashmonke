@@ -34,7 +34,22 @@ struct tui_render_state
     size_t num_rows;
     const char *manifest_title;
     int scroll_top;
+    double start_time;
 };
+
+static double render_monotonic_seconds(void)
+{
+    static LARGE_INTEGER freq;
+    static int init = 0;
+    if (!init)
+    {
+        QueryPerformanceFrequency(&freq);
+        init = 1;
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (double)now.QuadPart / (double)freq.QuadPart;
+}
 
 static void format_size_human(uint64_t bytes, char *buf, size_t buf_sz)
 {
@@ -63,6 +78,7 @@ struct tui_render_state *tui_render_state_create(const struct hashmonke_file *ma
     state->manifest_title = manifest_title ? manifest_title : "manifest";
     state->num_rows = manifest->num_entries;
     state->scroll_top = 0;
+    state->start_time = render_monotonic_seconds();
 
     if (state->num_rows > 0)
     {
@@ -249,8 +265,22 @@ void tui_render_frame(struct tui *tui, struct tui_render_state *state,
     tui_text(tui, "Workers   ");
     char worker_stats[64];
     uint32_t min_w = stats->min_hash_workers == UINT32_MAX ? 0 : stats->min_hash_workers;
-    snprintf(worker_stats, sizeof(worker_stats), "min %u · max %u · current %u",
-             min_w, stats->max_hash_workers, stats->active_workers);
+    if (stats->is_finished)
+    {
+        if (min_w > 0 && stats->max_hash_workers > min_w)
+            snprintf(worker_stats, sizeof(worker_stats), "min %u · max %u · finished",
+                     min_w, stats->max_hash_workers);
+        else
+            snprintf(worker_stats, sizeof(worker_stats), "%u · finished", stats->max_hash_workers);
+    }
+    else
+    {
+        if (min_w > 0 && stats->max_hash_workers > min_w)
+            snprintf(worker_stats, sizeof(worker_stats), "min %u · max %u · current %u",
+                     min_w, stats->max_hash_workers, stats->active_workers);
+        else
+            snprintf(worker_stats, sizeof(worker_stats), "%u active", stats->active_workers);
+    }
     tui_text(tui, worker_stats);
     tui_end_line(tui);
 
@@ -258,8 +288,46 @@ void tui_render_frame(struct tui *tui, struct tui_render_state *state,
     tui_start_line(tui);
     tui_text(tui, "Total     ");
     char total_stats[64];
-    snprintf(total_stats, sizeof(total_stats), "min %.1f · max %.1f · current %.1f MB/s",
-             stats->min_throughput_mb_s, stats->max_throughput_mb_s, stats->current_throughput_mb_s);
+    double rate = stats->current_throughput_mb_s;
+    if (rate <= 0.0 && stats->total_bytes_hashed > 0 && state && state->start_time > 0.0)
+    {
+        double elapsed = render_monotonic_seconds() - state->start_time;
+        if (elapsed > 0.0)
+            rate = ((double)stats->total_bytes_hashed / (1024.0 * 1024.0)) / elapsed;
+    }
+
+    if (stats->is_finished)
+    {
+        if (stats->min_throughput_mb_s > 0.0 && stats->max_throughput_mb_s > stats->min_throughput_mb_s + 0.05)
+        {
+            snprintf(total_stats, sizeof(total_stats), "min %.1f · max %.1f · avg %.1f MB/s",
+                     stats->min_throughput_mb_s, stats->max_throughput_mb_s, rate);
+        }
+        else if (rate > 0.0)
+        {
+            snprintf(total_stats, sizeof(total_stats), "avg %.1f MB/s", rate);
+        }
+        else
+        {
+            snprintf(total_stats, sizeof(total_stats), "0.0 MB/s");
+        }
+    }
+    else
+    {
+        if (stats->min_throughput_mb_s > 0.0 && stats->max_throughput_mb_s > stats->min_throughput_mb_s + 0.05)
+        {
+            snprintf(total_stats, sizeof(total_stats), "min %.1f · max %.1f · current %.1f MB/s",
+                     stats->min_throughput_mb_s, stats->max_throughput_mb_s, rate);
+        }
+        else if (rate > 0.0)
+        {
+            snprintf(total_stats, sizeof(total_stats), "current %.1f MB/s", rate);
+        }
+        else
+        {
+            snprintf(total_stats, sizeof(total_stats), "-- MB/s");
+        }
+    }
     tui_text(tui, total_stats);
     tui_end_line(tui);
 
@@ -351,20 +419,6 @@ void tui_render_frame(struct tui *tui, struct tui_render_state *state,
 static void render_sleep_ms(unsigned int ms)
 {
     Sleep(ms);
-}
-
-static double render_monotonic_seconds(void)
-{
-    static LARGE_INTEGER freq;
-    static int init = 0;
-    if (!init)
-    {
-        QueryPerformanceFrequency(&freq);
-        init = 1;
-    }
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    return (double)now.QuadPart / (double)freq.QuadPart;
 }
 
 int tui_render_run(struct hashmonke_file *manifest, const char *manifest_title,
