@@ -39,6 +39,14 @@ bool tui_render_handle_key(struct tui *tui, struct tui_render_state *state,
                            enum tui_key key);
 
 /**
+ * Prints the unified verification summary box and line-by-line file statuses,
+ * returning the process exit code.
+ */
+int print_verification_summary(const struct tui_render_state *state,
+                               const struct hashmonke_runner_stats *final_stats,
+                               double elapsed_sec);
+
+/**
  * Runs the interactive TUI verification loop until completion or interruption,
  * shutting down the TUI and printing the final summary.
  *

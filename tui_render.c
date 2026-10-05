@@ -421,6 +421,77 @@ static void render_sleep_ms(unsigned int ms)
     Sleep(ms);
 }
 
+int print_verification_summary(const struct tui_render_state *state,
+                               const struct hashmonke_runner_stats *final_stats,
+                               double elapsed_sec)
+{
+    if (elapsed_sec <= 0.0)
+        elapsed_sec = 0.001;
+
+    double total_mb = (double)final_stats->total_bytes_hashed / (1024.0 * 1024.0);
+    double avg_throughput = total_mb / elapsed_sec;
+
+    printf("\n============================================================\n");
+    printf("Verification Summary:\n");
+    printf("  Total Processed:       %u\n", final_stats->total_files_processed);
+    printf("  Hashing Workers:       %u min / %u max\n",
+           final_stats->max_hash_workers == 0 ? 0 : final_stats->min_hash_workers,
+           final_stats->max_hash_workers);
+    printf("  Matched:               %u\n", final_stats->files_matched);
+    printf("  Failed / Mismatches:   %u\n", final_stats->files_failed);
+    printf("  Missing / Unreadable:  %u\n", final_stats->files_missing);
+    printf("  Malformed Records:     %u\n", final_stats->files_malformed);
+    printf("  Total Data Hashed:     %.2f MB\n", total_mb);
+    printf("  Elapsed Time:          %.2f s\n", elapsed_sec);
+    printf("  Average Throughput:    %.2f MB/s\n", avg_throughput);
+    printf("============================================================\n");
+
+    if (state)
+    {
+        for (size_t i = 0; i < state->num_rows; ++i)
+        {
+            const struct tui_file_row_state *r = &state->rows[i];
+            const char *st = "err";
+            switch (r->status)
+            {
+            case TUI_ROW_MATCHED:
+                st = "match";
+                break;
+            case TUI_ROW_MISMATCH:
+                st = "mismatch";
+                break;
+            case TUI_ROW_MISSING:
+                st = "missing";
+                break;
+            case TUI_ROW_ERROR:
+            default:
+                st = "err";
+                break;
+            }
+            const char *p = r->display_path ? r->display_path
+                            : (r->file_path ? r->file_path : "<unknown>");
+            printf("%-10s %s\n", st, p);
+        }
+    }
+    fflush(stdout);
+
+    if (final_stats->has_error)
+    {
+        fprintf(stderr, "Error: Verification stopped before the manifest was fully processed.\n");
+        return 2;
+    }
+    if (final_stats->total_files_processed == 0)
+    {
+        fprintf(stderr, "Error: Checksum manifest contained no entries.\n");
+        return 2;
+    }
+    if (final_stats->files_failed > 0 || final_stats->files_missing > 0 || final_stats->files_malformed > 0)
+    {
+        return 1;
+    }
+    return 0;
+}
+
 int tui_render_run(struct hashmonke_file *manifest, const char *manifest_title,
                    uint32_t starting_workers, bool thread_warmup,
                    bool wait_for_input, volatile sig_atomic_t *interrupted)
@@ -496,50 +567,12 @@ int tui_render_run(struct hashmonke_file *manifest, const char *manifest_title,
     }
 
     tui_shutdown(tui);
-    tui_render_state_free(state);
 
-    if (elapsed_sec <= 0.0)
-        elapsed_sec = 0.001;
-
-    double total_mb = (double)final_stats.total_bytes_hashed / (1024.0 * 1024.0);
-    double avg_throughput = total_mb / elapsed_sec;
-
-    printf("\n============================================================\n");
-    printf("Verification Summary:\n");
-    printf("  Total Processed:       %u\n", final_stats.total_files_processed);
-    printf("  Hashing Workers:       %u min / %u max\n",
-           final_stats.max_hash_workers == 0 ? 0 : final_stats.min_hash_workers,
-           final_stats.max_hash_workers);
-    printf("  Matched:               %u\n", final_stats.files_matched);
-    printf("  Failed / Mismatches:   %u\n", final_stats.files_failed);
-    printf("  Missing / Unreadable:  %u\n", final_stats.files_missing);
-    printf("  Malformed Records:     %u\n", final_stats.files_malformed);
-    printf("  Total Data Hashed:     %.2f MB\n", total_mb);
-    printf("  Elapsed Time:          %.2f s\n", elapsed_sec);
-    printf("  Average Throughput:    %.2f MB/s\n", avg_throughput);
-    printf("============================================================\n");
-    fflush(stdout);
-
-    int exit_code = 0;
+    int exit_code = print_verification_summary(state, &final_stats, elapsed_sec);
     if (interrupted && *interrupted)
-    {
         exit_code = 130;
-    }
-    else if (final_stats.has_error)
-    {
-        fprintf(stderr, "Error: Verification stopped before the manifest was fully processed.\n");
-        exit_code = 2;
-    }
-    else if (final_stats.total_files_processed == 0)
-    {
-        fprintf(stderr, "Error: Checksum manifest contained no entries.\n");
-        exit_code = 2;
-    }
-    else if (final_stats.files_failed > 0 || final_stats.files_missing > 0 || final_stats.files_malformed > 0)
-    {
-        exit_code = 1;
-    }
 
+    tui_render_state_free(state);
     hashmonke_runner_free(runner);
     hashmonke_file_free(manifest);
     return exit_code;
