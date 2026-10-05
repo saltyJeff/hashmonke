@@ -8,36 +8,36 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
     add_compile_options(
-        /W4
-        /O2
-        /arch:SSE4.2
-        /utf-8
-        /D_CRT_SECURE_NO_WARNINGS
+        $<$<COMPILE_LANGUAGE:C,CXX>:/W4>
+        $<$<COMPILE_LANGUAGE:C,CXX>:/arch:SSE4.2>
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>
+        $<$<COMPILE_LANGUAGE:C,CXX>:/D_CRT_SECURE_NO_WARNINGS>
     )
 endif()
 
-# Find clang for assembling GNU .S assembly files with x86-64-v2 target
-find_program(CLANG_ASM_COMPILER NAMES clang clang.exe REQUIRED
-    DOC "Path to clang compiler used for assembling .S files")
+if(NOT CMAKE_ASM_MASM_COMPILER OR CMAKE_ASM_MASM_COMPILER STREQUAL "ml")
+    find_program(MASM_ML64_PROG NAMES ml64.exe ml64)
+    if(NOT MASM_ML64_PROG)
+        file(GLOB MASM_ML64_CANDIDATES
+            "C:/Program Files/Microsoft Visual Studio/*/*/VC/Tools/MSVC/*/bin/Hostx64/x64/ml64.exe"
+            "C:/Program Files (x86)/Microsoft Visual Studio/*/*/VC/Tools/MSVC/*/bin/Hostx64/x64/ml64.exe"
+        )
+        if(MASM_ML64_CANDIDATES)
+            list(GET MASM_ML64_CANDIDATES 0 MASM_ML64_PROG)
+        endif()
+    endif()
+    if(MASM_ML64_PROG)
+        set(CMAKE_ASM_MASM_COMPILER "${MASM_ML64_PROG}" CACHE FILEPATH "MASM compiler" FORCE)
+    endif()
+endif()
+
+enable_language(ASM_MASM)
 
 set(ASM_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/algo/crc32_x86_64.S"
-    "${CMAKE_CURRENT_SOURCE_DIR}/algo/md5_x86_64.S"
-    "${CMAKE_CURRENT_SOURCE_DIR}/algo/sha1_x86_64.S"
+    algo/crc32_x86_64.asm
+    algo/md5_x86_64.asm
+    algo/sha1_x86_64.asm
 )
-
-set(ASM_OBJECTS "")
-foreach(ASM_SRC IN LISTS ASM_SOURCES)
-    get_filename_component(ASM_NAME "${ASM_SRC}" NAME_WLE)
-    set(ASM_OBJ "${CMAKE_CURRENT_BINARY_DIR}/${ASM_NAME}.obj")
-    add_custom_command(
-        OUTPUT "${ASM_OBJ}"
-        COMMAND "${CLANG_ASM_COMPILER}" --target=x86_64-pc-windows-msvc -march=x86-64-v2 -c "${ASM_SRC}" -o "${ASM_OBJ}"
-        DEPENDS "${ASM_SRC}"
-        COMMENT "Assembling ${ASM_NAME}.S with clang (target: x86-64-v2)"
-    )
-    list(APPEND ASM_OBJECTS "${ASM_OBJ}")
-endforeach()
 
 set(CORE_SOURCES
     file.c
@@ -57,7 +57,7 @@ set(CORE_SOURCES
 
 add_library(hashmonke_core STATIC
     ${CORE_SOURCES}
-    ${ASM_OBJECTS}
+    ${ASM_SOURCES}
 )
 
 target_include_directories(hashmonke_core PUBLIC
@@ -66,7 +66,7 @@ target_include_directories(hashmonke_core PUBLIC
 )
 
 if(MSVC)
-    target_compile_options(hashmonke_core PRIVATE /experimental:c11atomics)
+    target_compile_options(hashmonke_core PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:/experimental:c11atomics>)
 endif()
 
 add_executable(hashmonke
@@ -74,7 +74,7 @@ add_executable(hashmonke
 )
 target_link_libraries(hashmonke PRIVATE hashmonke_core)
 if(MSVC)
-    target_compile_options(hashmonke PRIVATE /experimental:c11atomics)
+    target_compile_options(hashmonke PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:/experimental:c11atomics>)
 endif()
 
 include(CTest)
