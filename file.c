@@ -232,12 +232,12 @@ struct hashmonke_file_list *hashmonke_file_list(const char *folder_path, const c
         for (size_t i = 0; i < count; ++i)
         {
             list->entries[i].line_number = entries[i].line_number;
-            list->entries[i].file_path = entries[i].file_path ? strdup(entries[i].file_path) : NULL;
-            list->entries[i].display_path = entries[i].display_path ? strdup(entries[i].display_path) : NULL;
+            list->entries[i].file_path = entries[i].file_path;
+            list->entries[i].display_path = entries[i].display_path;
             list->entries[i].algo = entries[i].algo;
             list->entries[i].code = entries[i].code;
             list->entries[i].text_mode = entries[i].text_mode;
-            clear_entry(&entries[i]);
+            free((void *)entries[i].hash);
         }
     }
     free(entries);

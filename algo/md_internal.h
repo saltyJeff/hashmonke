@@ -28,18 +28,11 @@ static inline uint32_t CRYPTO_load_u32_le(const void *ptr)
 {
     uint32_t ret;
     memcpy(&ret, ptr, sizeof(ret));
-#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    return HASHMONKE_BSWAP32(ret);
-#else
     return ret;
-#endif
 }
 
 static inline void CRYPTO_store_u32_le(void *ptr, uint32_t val)
 {
-#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    val = HASHMONKE_BSWAP32(val);
-#endif
     memcpy(ptr, &val, sizeof(val));
 }
 
@@ -47,18 +40,12 @@ static inline uint32_t CRYPTO_load_u32_be(const void *ptr)
 {
     uint32_t ret;
     memcpy(&ret, ptr, sizeof(ret));
-#if (defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
-    return ret;
-#else
-    return HASHMONKE_BSWAP32(ret);
-#endif
+    return _byteswap_ulong(ret);
 }
 
 static inline void CRYPTO_store_u32_be(void *ptr, uint32_t val)
 {
-#if !(defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
-    val = HASHMONKE_BSWAP32(val);
-#endif
+    val = _byteswap_ulong(val);
     memcpy(ptr, &val, sizeof(val));
 }
 

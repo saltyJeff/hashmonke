@@ -106,25 +106,17 @@ static const uint8_t *crc32_final(struct hashmonke_md *md)
         CRYPTO_store_u32_be(out, final_crc);
     }
 
-    free(c);
     free(md);
     return out;
 }
 
-struct hashmonke_md *hashmonke_md_crc32()
+struct hashmonke_md *hashmonke_md_crc32(void)
 {
-    struct hashmonke_md *md = (struct hashmonke_md *)malloc(sizeof(struct hashmonke_md));
-    CRC32_CTX *c = (CRC32_CTX *)malloc(sizeof(CRC32_CTX));
-
-    if (!md || !c)
-    {
-        if (md)
-            free(md);
-        if (c)
-            free(c);
+    struct hashmonke_md *md = (struct hashmonke_md *)malloc(sizeof(struct hashmonke_md) + sizeof(CRC32_CTX));
+    if (!md)
         return NULL;
-    }
 
+    CRC32_CTX *c = (CRC32_CTX *)(md + 1);
     c->crc = 0xFFFFFFFFUL;
     md->ctx = c;
     md->update = crc32_update;

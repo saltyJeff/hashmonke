@@ -1,4 +1,5 @@
 #include "hasher.h"
+#include "time_util.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <io.h>
@@ -42,19 +43,6 @@ struct pipeline_ctx
     uint64_t start_ms;
 };
 
-static uint64_t monotonic_ms(void)
-{
-    static LARGE_INTEGER freq;
-    static int init = 0;
-    if (!init)
-    {
-        QueryPerformanceFrequency(&freq);
-        init = 1;
-    }
-    LARGE_INTEGER counter;
-    QueryPerformanceCounter(&counter);
-    return (uint64_t)((counter.QuadPart * 1000) / freq.QuadPart);
-}
 
 static DWORD WINAPI compute_worker(LPVOID arg)
 {
@@ -85,7 +73,7 @@ static DWORD WINAPI compute_worker(LPVOID arg)
                 if (ctx->ctrl)
                 {
                     atomic_fetch_add(&ctx->ctrl->bytes_hashed, len);
-                    uint64_t now = monotonic_ms();
+                    uint64_t now = hashmonke_monotonic_ms();
                     atomic_store(&ctx->ctrl->ms_elapsed, (size_t)(now >= ctx->start_ms ? now - ctx->start_ms : 0));
                     if (ctx->ctrl->progress_cb)
                     {
@@ -184,7 +172,7 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
     if (fd < 0)
         return HASHMONKE_HASH_IO_ERR;
 
-    uint64_t start_ms = monotonic_ms();
+    uint64_t start_ms = hashmonke_monotonic_ms();
 
     if (ctrl)
     {
@@ -342,7 +330,7 @@ enum hashmonke_hash_code hashmonke_hasher_hash(struct hashmonke_hasher *hasher, 
 
     if (ctrl)
     {
-        uint64_t now = monotonic_ms();
+        uint64_t now = hashmonke_monotonic_ms();
         atomic_store(&ctrl->ms_elapsed, (size_t)(now >= start_ms ? now - start_ms : 0));
     }
 

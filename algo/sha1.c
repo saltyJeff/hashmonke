@@ -277,22 +277,17 @@ static const uint8_t *sha1_final(struct hashmonke_md *md)
         CRYPTO_store_u32_be(out + 16, c->h[4]);
     }
 
-    free(c);
     free(md);
     return out;
 }
 
-struct hashmonke_md *hashmonke_md_sha1()
+struct hashmonke_md *hashmonke_md_sha1(void)
 {
-    struct hashmonke_md *md = (struct hashmonke_md *)malloc(sizeof(struct hashmonke_md));
-    SHA_CTX *c = (SHA_CTX *)malloc(sizeof(SHA_CTX));
-
-    if (!md || !c) {
-        if (md) free(md);
-        if (c) free(c);
+    struct hashmonke_md *md = (struct hashmonke_md *)malloc(sizeof(struct hashmonke_md) + sizeof(SHA_CTX));
+    if (!md)
         return NULL;
-    }
 
+    SHA_CTX *c = (SHA_CTX *)(md + 1);
     memset(c, 0, sizeof(SHA_CTX));
     c->h[0] = 0x67452301UL;
     c->h[1] = 0xefcdab89UL;

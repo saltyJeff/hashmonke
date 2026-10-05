@@ -1,4 +1,5 @@
 #include "tui_render.h"
+#include "time_util.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -37,30 +38,22 @@ struct tui_render_state
     double start_time;
 };
 
-static double render_monotonic_seconds(void)
-{
-    static LARGE_INTEGER freq;
-    static int init = 0;
-    if (!init)
-    {
-        QueryPerformanceFrequency(&freq);
-        init = 1;
-    }
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    return (double)now.QuadPart / (double)freq.QuadPart;
-}
 
 static void format_size_human(uint64_t bytes, char *buf, size_t buf_sz)
 {
-    if (bytes >= 1024ULL * 1024ULL * 1024ULL)
-        snprintf(buf, buf_sz, "%.1f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
-    else if (bytes >= 1024ULL * 1024ULL)
-        snprintf(buf, buf_sz, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
-    else if (bytes >= 1024ULL)
-        snprintf(buf, buf_sz, "%.1f KB", (double)bytes / 1024.0);
+    static const char suffixes[] = {'B', 'K', 'M', 'G', 'T', 'P', 'E'};
+    double size = (double)bytes;
+    int idx = 0;
+    while (size >= 1024.0 && idx < 6)
+    {
+        size /= 1024.0;
+        idx++;
+    }
+
+    if (idx == 0)
+        snprintf(buf, buf_sz, "%lluB", (unsigned long long)bytes);
     else
-        snprintf(buf, buf_sz, "%llu B", (unsigned long long)bytes);
+        snprintf(buf, buf_sz, "%.1f%c", size, suffixes[idx]);
 }
 
 struct tui_render_state *tui_render_state_create(const struct hashmonke_file *manifest,
@@ -78,7 +71,7 @@ struct tui_render_state *tui_render_state_create(const struct hashmonke_file *ma
     state->manifest_title = manifest_title ? manifest_title : "manifest";
     state->num_rows = manifest->num_entries;
     state->scroll_top = 0;
-    state->start_time = render_monotonic_seconds();
+    state->start_time = hashmonke_monotonic_seconds();
 
     if (state->num_rows > 0)
     {
@@ -291,7 +284,7 @@ void tui_render_frame(struct tui *tui, struct tui_render_state *state,
     double rate = stats->current_throughput_mb_s;
     if (rate <= 0.0 && stats->total_bytes_hashed > 0 && state && state->start_time > 0.0)
     {
-        double elapsed = render_monotonic_seconds() - state->start_time;
+        double elapsed = hashmonke_monotonic_seconds() - state->start_time;
         if (elapsed > 0.0)
             rate = ((double)stats->total_bytes_hashed / (1024.0 * 1024.0)) / elapsed;
     }
@@ -416,10 +409,6 @@ void tui_render_frame(struct tui *tui, struct tui_render_state *state,
     tui_end_frame(tui);
 }
 
-static void render_sleep_ms(unsigned int ms)
-{
-    Sleep(ms);
-}
 
 int print_verification_summary(const struct tui_render_state *state,
                                const struct hashmonke_runner_stats *final_stats,
@@ -431,6 +420,9 @@ int print_verification_summary(const struct tui_render_state *state,
     double total_mb = (double)final_stats->total_bytes_hashed / (1024.0 * 1024.0);
     double avg_throughput = total_mb / elapsed_sec;
 
+    char total_data_buf[32];
+    format_size_human(final_stats->total_bytes_hashed, total_data_buf, sizeof(total_data_buf));
+
     printf("\n============================================================\n");
     printf("Verification Summary:\n");
     printf("  Total Processed:       %u\n", final_stats->total_files_processed);
@@ -441,7 +433,7 @@ int print_verification_summary(const struct tui_render_state *state,
     printf("  Failed / Mismatches:   %u\n", final_stats->files_failed);
     printf("  Missing / Unreadable:  %u\n", final_stats->files_missing);
     printf("  Malformed Records:     %u\n", final_stats->files_malformed);
-    printf("  Total Data Hashed:     %.2f MB\n", total_mb);
+    printf("  Total Data Hashed:     %s\n", total_data_buf);
     printf("  Elapsed Time:          %.2f s\n", elapsed_sec);
     printf("  Average Throughput:    %.2f MB/s\n", avg_throughput);
     printf("============================================================\n");
@@ -522,7 +514,7 @@ int tui_render_run(struct hashmonke_file *manifest, const char *manifest_title,
         return 2;
     }
 
-    double start_time = render_monotonic_seconds();
+    double start_time = hashmonke_monotonic_seconds();
 
     while (true)
     {
@@ -540,13 +532,13 @@ int tui_render_run(struct hashmonke_file *manifest, const char *manifest_title,
 
         tui_render_handle_key(tui, state, k);
         tui_render_frame(tui, state, &stats);
-        render_sleep_ms(30);
+        hashmonke_sleep_ms(30);
     }
 
     if (interrupted && *interrupted)
         hashmonke_runner_interrupt(runner);
     hashmonke_runner_wait(runner);
-    double elapsed_sec = render_monotonic_seconds() - start_time;
+    double elapsed_sec = hashmonke_monotonic_seconds() - start_time;
 
     struct hashmonke_runner_stats final_stats = hashmonke_runner_get_stats(runner);
 
@@ -562,7 +554,7 @@ int tui_render_run(struct hashmonke_file *manifest, const char *manifest_title,
                 break;
             tui_render_handle_key(tui, state, k);
             tui_render_frame(tui, state, &final_stats);
-            render_sleep_ms(30);
+            hashmonke_sleep_ms(30);
         }
     }
 

@@ -1,4 +1,5 @@
 #include "runner.h"
+#include "time_util.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,19 +85,6 @@ struct hashmonke_runner
     struct hashmonke_runner_stats published_stats;
 };
 
-static double runner_monotonic_seconds(void)
-{
-    static LARGE_INTEGER freq;
-    static int init = 0;
-    if (!init)
-    {
-        QueryPerformanceFrequency(&freq);
-        init = 1;
-    }
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    return (double)now.QuadPart / (double)freq.QuadPart;
-}
 
 static uint32_t get_default_max_workers(void)
 {
@@ -318,7 +306,7 @@ static void process_events(struct hashmonke_runner *runner)
         {
             struct event_msg *m = &batch[i];
             struct hashmonke_file_entry *entry = &runner->file->entries[m->entry_idx];
-            double elapsed = runner_monotonic_seconds() - m->worker->start_time;
+            double elapsed = hashmonke_monotonic_seconds() - m->worker->start_time;
             double mb_s = (elapsed > 0.0) ? ((double)m->bytes_hashed / (1024.0 * 1024.0)) / elapsed : 0.0;
 
             if (m->type == HASHMONKE_RUNNER_EVENT_PROGRESS)
@@ -385,7 +373,7 @@ static void dispatch_workers(struct hashmonke_runner *runner)
             w->busy = true;
             w->entry = entry;
             w->entry_idx = idx;
-            w->start_time = runner_monotonic_seconds();
+            w->start_time = hashmonke_monotonic_seconds();
             runner->active_workers++;
             emit_event(runner, HASHMONKE_RUNNER_EVENT_START, entry, idx, 0, 0, 0, 0.0);
             SetEvent(w->work_event);
@@ -401,7 +389,7 @@ static void dispatch_workers(struct hashmonke_runner *runner)
 static DWORD WINAPI loop_thread_proc(LPVOID arg)
 {
     struct hashmonke_runner *r = (struct hashmonke_runner *)arg;
-    double win_t = runner_monotonic_seconds(), last_sample_t = win_t;
+    double win_t = hashmonke_monotonic_seconds(), last_sample_t = win_t;
     uint64_t win_b = 0, last_sample_b = 0;
 
     while (!r->interrupted)
@@ -420,7 +408,7 @@ static DWORD WINAPI loop_thread_proc(LPVOID arg)
                 r->stats.min_hash_workers = r->active_workers;
         }
 
-        double now = runner_monotonic_seconds();
+        double now = hashmonke_monotonic_seconds();
         if (now - last_sample_t >= 0.1)
         {
             uint64_t sb = (r->stats.total_bytes_hashed >= last_sample_b) ? (r->stats.total_bytes_hashed - last_sample_b) : 0;
@@ -449,7 +437,7 @@ static DWORD WINAPI loop_thread_proc(LPVOID arg)
         LeaveCriticalSection(&r->stats_lock);
     }
 
-    double elapsed = runner_monotonic_seconds() - r->start_time;
+    double elapsed = hashmonke_monotonic_seconds() - r->start_time;
     update_throughput(&r->stats, ((double)r->stats.total_bytes_hashed / (1024.0 * 1024.0)) / (elapsed > 0 ? elapsed : 0.001));
     r->stats.is_finished = true;
     r->stats.active_workers = 0;
@@ -478,7 +466,7 @@ struct hashmonke_runner *hashmonke_runner_run_with_events(
     runner->event_cb = event_cb;
     runner->event_ctx = event_ctx;
     runner->thread_warmup = thread_warmup;
-    runner->start_time = runner_monotonic_seconds();
+    runner->start_time = hashmonke_monotonic_seconds();
 
     runner->max_workers = get_default_max_workers();
     if (starting_workers > runner->max_workers)

@@ -2,6 +2,7 @@
 #include "file.h"
 #include "hash.h"
 #include "runner.h"
+#include "time_util.h"
 #include "tui_render.h"
 #include <io.h>
 #include <signal.h>
@@ -21,25 +22,6 @@ static void sigint_handler(int sig)
 static bool is_terminal(FILE *stream)
 {
     return _isatty(_fileno(stream)) != 0;
-}
-
-static double monotonic_seconds(void)
-{
-    static LARGE_INTEGER freq;
-    static int init = 0;
-    if (!init)
-    {
-        QueryPerformanceFrequency(&freq);
-        init = 1;
-    }
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    return (double)now.QuadPart / (double)freq.QuadPart;
-}
-
-static void sleep_ms(unsigned int milliseconds)
-{
-    Sleep(milliseconds);
 }
 
 static void wait_for_keypress(void)
@@ -111,21 +93,21 @@ int main(int argc, const char **argv)
         return 2;
     }
 
-    double start_time = monotonic_seconds();
+    double start_time = hashmonke_monotonic_seconds();
 
     while (true)
     {
         struct hashmonke_runner_stats stats = hashmonke_runner_get_stats(runner);
         if (stats.is_finished || g_interrupted)
             break;
-        sleep_ms(50);
+        hashmonke_sleep_ms(50);
     }
 
     if (g_interrupted)
         hashmonke_runner_interrupt(runner);
     hashmonke_runner_wait(runner);
 
-    double elapsed_sec = monotonic_seconds() - start_time;
+    double elapsed_sec = hashmonke_monotonic_seconds() - start_time;
     struct hashmonke_runner_stats final_stats = hashmonke_runner_get_stats(runner);
 
     // Single unified verification summary and exit code calculation

@@ -211,22 +211,17 @@ static const uint8_t *md5_final(struct hashmonke_md *md)
         CRYPTO_store_u32_le(out + 12, c->h[3]);
     }
 
-    free(c);
     free(md);
     return out;
 }
 
-struct hashmonke_md *hashmonke_md_md5()
+struct hashmonke_md *hashmonke_md_md5(void)
 {
-    struct hashmonke_md *md = (struct hashmonke_md *)malloc(sizeof(struct hashmonke_md));
-    MD5_CTX *c = (MD5_CTX *)malloc(sizeof(MD5_CTX));
-
-    if (!md || !c) {
-        if (md) free(md);
-        if (c) free(c);
+    struct hashmonke_md *md = (struct hashmonke_md *)malloc(sizeof(struct hashmonke_md) + sizeof(MD5_CTX));
+    if (!md)
         return NULL;
-    }
 
+    MD5_CTX *c = (MD5_CTX *)(md + 1);
     memset(c, 0, sizeof(MD5_CTX));
     c->h[0] = 0x67452301UL;
     c->h[1] = 0xefcdab89UL;

@@ -74,20 +74,13 @@ bool hashmonke_parse_bsd(const char *line, const char *base_dir, struct hashmonk
         return false;
     memcpy(path_buf, p, path_len);
     path_buf[path_len] = '\0';
-    char *unescaped = hashmonke_unescape_path(path_buf);
-    free(path_buf);
-    if (!unescaped)
-        return false;
-    hashmonke_strip_quotes(unescaped);
 
-    char *disp_path = strdup(unescaped);
-    char *abs_path = hashmonke_resolve_entry_path(base_dir, unescaped);
-    free(unescaped);
-    if (!abs_path)
-    {
-        free(disp_path);
+    char *disp_path = NULL;
+    char *abs_path = NULL;
+    bool path_ok = hashmonke_process_entry_paths(base_dir, path_buf, &disp_path, &abs_path);
+    free(path_buf);
+    if (!path_ok)
         return false;
-    }
 
     size_t out_len = 0;
     uint8_t *bytes = hashmonke_hex_to_bytes(hex, expected_hex_len, &out_len);

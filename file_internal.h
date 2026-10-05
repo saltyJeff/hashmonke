@@ -22,15 +22,6 @@
 #define strdup _strdup
 #endif
 
-static inline int hashmonke_open_entry(const char *path, bool binary_mode)
-{
-    int flags = O_RDONLY;
-#ifdef _O_BINARY
-    flags |= (binary_mode ? _O_BINARY : 0);
-#endif
-    return _open(path, flags);
-}
-
 /* Read one complete text line, growing the buffer as needed. Returns 1 on a
  * line, 0 at clean EOF, and -1 on allocation or I/O failure. */
 static inline int hashmonke_read_line(FILE *fp, char **line, size_t *capacity)
@@ -60,196 +51,6 @@ static inline int hashmonke_read_line(FILE *fp, char **line, size_t *capacity)
         return 0;
     (*line)[length] = '\0';
     return 1;
-}
-
-/* -------------------------------------------------------------------------
- * Lightweight, zero-allocation String Scanner
- * ------------------------------------------------------------------------- */
-struct hashmonke_scanner
-{
-    const char *start;
-    const char *cur;
-    const char *end;
-};
-
-static inline void hashmonke_scanner_init(struct hashmonke_scanner *s, const char *str)
-{
-    s->start = str ? str : "";
-    s->cur = s->start;
-    s->end = s->start + strlen(s->start);
-}
-
-static inline bool hashmonke_scanner_eof(const struct hashmonke_scanner *s)
-{
-    return s->cur >= s->end;
-}
-
-static inline char hashmonke_scanner_peek(const struct hashmonke_scanner *s)
-{
-    return (s->cur < s->end) ? *s->cur : '\0';
-}
-
-static inline char hashmonke_scanner_next(struct hashmonke_scanner *s)
-{
-    return (s->cur < s->end) ? *(s->cur++) : '\0';
-}
-
-static inline size_t hashmonke_scanner_skip_ws(struct hashmonke_scanner *s)
-{
-    size_t count = 0;
-    while (s->cur < s->end && (*s->cur == ' ' || *s->cur == '\t'))
-    {
-        s->cur++;
-        count++;
-    }
-    return count;
-}
-
-static inline bool hashmonke_scanner_match_char(struct hashmonke_scanner *s, char expected)
-{
-    if (s->cur < s->end && *s->cur == expected)
-    {
-        s->cur++;
-        return true;
-    }
-    return false;
-}
-
-static inline bool hashmonke_scanner_match_str(struct hashmonke_scanner *s, const char *prefix)
-{
-    size_t len = strlen(prefix);
-    if ((size_t)(s->end - s->cur) >= len && strncmp(s->cur, prefix, len) == 0)
-    {
-        s->cur += len;
-        return true;
-    }
-    return false;
-}
-
-static inline bool hashmonke_scanner_match_str_ci(struct hashmonke_scanner *s, const char *prefix)
-{
-    size_t len = strlen(prefix);
-    if ((size_t)(s->end - s->cur) >= len && strncasecmp(s->cur, prefix, len) == 0)
-    {
-        s->cur += len;
-        return true;
-    }
-    return false;
-}
-
-static inline size_t hashmonke_scanner_scan_hex_token(struct hashmonke_scanner *s, char *out, size_t out_sz)
-{
-    size_t len = 0;
-    while (s->cur < s->end && isxdigit((unsigned char)*s->cur))
-    {
-        if (len + 1 < out_sz)
-        {
-            out[len] = *s->cur;
-        }
-        len++;
-        s->cur++;
-    }
-    if (out_sz > 0)
-    {
-        size_t term_idx = (len < out_sz) ? len : (out_sz - 1);
-        out[term_idx] = '\0';
-    }
-    return len;
-}
-
-static inline bool hashmonke_scanner_scan_fixed_hex(struct hashmonke_scanner *s, size_t expected_len, char *out,
-                                                    size_t out_sz)
-{
-    if (expected_len + 1 > out_sz)
-        return false;
-    if ((size_t)(s->end - s->cur) < expected_len)
-        return false;
-    for (size_t i = 0; i < expected_len; ++i)
-    {
-        if (!isxdigit((unsigned char)s->cur[i]))
-            return false;
-        out[i] = s->cur[i];
-    }
-    out[expected_len] = '\0';
-    s->cur += expected_len;
-    return true;
-}
-
-static inline bool hashmonke_scanner_scan_until_str(struct hashmonke_scanner *s, const char *needle, char *out,
-                                                    size_t out_sz)
-{
-    const char *pos = strstr(s->cur, needle);
-    if (!pos || pos >= s->end)
-        return false;
-    size_t len = pos - s->cur;
-    if (len + 1 > out_sz)
-        return false;
-    memcpy(out, s->cur, len);
-    out[len] = '\0';
-    s->cur = pos + strlen(needle);
-    return true;
-}
-
-static inline bool hashmonke_scanner_scan_remaining(struct hashmonke_scanner *s, char *out, size_t out_sz)
-{
-    hashmonke_scanner_skip_ws(s);
-    if (hashmonke_scanner_eof(s))
-        return false;
-    size_t len = s->end - s->cur;
-    if (len + 1 > out_sz)
-        return false;
-    memcpy(out, s->cur, len);
-    out[len] = '\0';
-    s->cur = s->end;
-    return true;
-}
-
-static inline bool hashmonke_scanner_split_trailing_token(const struct hashmonke_scanner *s, char *head_out,
-                                                          size_t head_sz, char *tail_out, size_t tail_sz)
-{
-    if (s->cur >= s->end)
-        return false;
-    const char *last_ws = NULL;
-    size_t remaining = (size_t)(s->end - s->cur);
-    for (size_t i = remaining; i > 0; --i)
-    {
-        const char *p = s->cur + (i - 1);
-        if (*p == ' ' || *p == '\t')
-        {
-            last_ws = p;
-            break;
-        }
-    }
-    if (!last_ws)
-        return false;
-
-    // Head is s->cur ... last_ws
-    const char *head_start = s->cur;
-    while (head_start < last_ws && (*head_start == ' ' || *head_start == '\t'))
-        head_start++;
-    const char *head_end = last_ws;
-    while (head_end > head_start && (*(head_end - 1) == ' ' || *(head_end - 1) == '\t'))
-        head_end--;
-    size_t head_len = head_end - head_start;
-    if (head_len == 0 || head_len + 1 > head_sz)
-        return false;
-    memcpy(head_out, head_start, head_len);
-    head_out[head_len] = '\0';
-
-    // Tail is last_ws + 1 ... s->end
-    const char *tail_start = last_ws + 1;
-    while (tail_start < s->end && (*tail_start == ' ' || *tail_start == '\t'))
-        tail_start++;
-    const char *tail_end = s->end;
-    while (tail_end > tail_start && (*(tail_end - 1) == ' ' || *(tail_end - 1) == '\t'))
-        tail_end--;
-    size_t tail_len = tail_end - tail_start;
-    if (tail_len == 0 || tail_len + 1 > tail_sz)
-        return false;
-    memcpy(tail_out, tail_start, tail_len);
-    tail_out[tail_len] = '\0';
-
-    return true;
 }
 
 /* -------------------------------------------------------------------------
@@ -397,6 +198,27 @@ static inline char *hashmonke_resolve_entry_path(const char *base_dir, const cha
     char *canonical = hashmonke_canonical_path(combined);
     free(combined);
     return canonical;
+}
+
+static inline bool hashmonke_process_entry_paths(const char *base_dir, const char *raw_path,
+                                                 char **out_display, char **out_abs)
+{
+    char *unescaped = hashmonke_unescape_path(raw_path);
+    if (!unescaped)
+        return false;
+    hashmonke_strip_quotes(unescaped);
+
+    char *disp_path = _strdup(unescaped);
+    char *abs_path = hashmonke_resolve_entry_path(base_dir, unescaped);
+    free(unescaped);
+    if (!abs_path)
+    {
+        free(disp_path);
+        return false;
+    }
+    *out_display = disp_path;
+    *out_abs = abs_path;
+    return true;
 }
 
 static inline char *hashmonke_trim_right(char *str)

@@ -20,18 +20,19 @@ void hashmonke_print_help(const char *prog_name)
     printf("  -h, --help            Show this help message and exit\n");
 }
 
-static bool str_case_eq(const char *s1, const char *s2)
+static bool parse_format_string(const char *fmt_str, enum hashmonke_file_format *out_fmt)
 {
-    while (*s1 && *s2)
-    {
-        char c1 = (*s1 >= 'A' && *s1 <= 'Z') ? (*s1 + 32) : *s1;
-        char c2 = (*s2 >= 'A' && *s2 <= 'Z') ? (*s2 + 32) : *s2;
-        if (c1 != c2)
-            return false;
-        s1++;
-        s2++;
-    }
-    return (*s1 == '\0' && *s2 == '\0');
+    if (_stricmp(fmt_str, "auto") == 0)
+        *out_fmt = HASHMONKE_FILE_FORMAT_AUTODETECT;
+    else if (_stricmp(fmt_str, "sfv") == 0)
+        *out_fmt = HASHMONKE_FILE_FORMAT_SFV;
+    else if (_stricmp(fmt_str, "gnu") == 0 || _stricmp(fmt_str, "md5") == 0)
+        *out_fmt = HASHMONKE_FILE_FORMAT_GNU_MD5;
+    else if (_stricmp(fmt_str, "bsd") == 0)
+        *out_fmt = HASHMONKE_FILE_FORMAT_BSD;
+    else
+        return false;
+    return true;
 }
 
 struct hashmonke_cli hashmonke_parse_cli(int argc, const char **argv)
@@ -95,72 +96,34 @@ struct hashmonke_cli hashmonke_parse_cli(int argc, const char **argv)
             }
             res.starting_workers = (uint32_t)parsed;
         }
-        else if (strcmp(arg, "--folder") == 0)
+        else if (strcmp(arg, "--folder") == 0 || strncmp(arg, "--folder=", 9) == 0)
         {
-            if (i + 1 >= argc)
+            if (arg[8] == '=')
+                res.folder = arg + 9;
+            else if (i + 1 < argc)
+                res.folder = argv[++i];
+            else
             {
                 res.task = HASHMONKE_CLI_ERR;
                 res.err_msg = "Option '--folder' requires an argument.";
                 return res;
             }
-            res.folder = argv[++i];
         }
-        else if (strncmp(arg, "--folder=", 9) == 0)
+        else if (strcmp(arg, "--format") == 0 || strncmp(arg, "--format=", 9) == 0)
         {
-            res.folder = arg + 9;
-        }
-        else if (strcmp(arg, "--format") == 0)
-        {
-            if (i + 1 >= argc)
+            const char *fmt_str = NULL;
+            if (arg[8] == '=')
+                fmt_str = arg + 9;
+            else if (i + 1 < argc)
+                fmt_str = argv[++i];
+            else
             {
                 res.task = HASHMONKE_CLI_ERR;
                 res.err_msg = "Option '--format' requires an argument.";
                 return res;
             }
-            const char *fmt_str = argv[++i];
-            if (str_case_eq(fmt_str, "auto"))
-            {
-                res.format = HASHMONKE_FILE_FORMAT_AUTODETECT;
-            }
-            else if (str_case_eq(fmt_str, "sfv"))
-            {
-                res.format = HASHMONKE_FILE_FORMAT_SFV;
-            }
-            else if (str_case_eq(fmt_str, "gnu") || str_case_eq(fmt_str, "md5"))
-            {
-                res.format = HASHMONKE_FILE_FORMAT_GNU_MD5;
-            }
-            else if (str_case_eq(fmt_str, "bsd"))
-            {
-                res.format = HASHMONKE_FILE_FORMAT_BSD;
-            }
-            else
-            {
-                res.task = HASHMONKE_CLI_ERR;
-                res.err_msg = "Invalid format specified. Must be one of: auto, sfv, gnu, bsd.";
-                return res;
-            }
-        }
-        else if (strncmp(arg, "--format=", 9) == 0)
-        {
-            const char *fmt_str = arg + 9;
-            if (str_case_eq(fmt_str, "auto"))
-            {
-                res.format = HASHMONKE_FILE_FORMAT_AUTODETECT;
-            }
-            else if (str_case_eq(fmt_str, "sfv"))
-            {
-                res.format = HASHMONKE_FILE_FORMAT_SFV;
-            }
-            else if (str_case_eq(fmt_str, "gnu") || str_case_eq(fmt_str, "md5"))
-            {
-                res.format = HASHMONKE_FILE_FORMAT_GNU_MD5;
-            }
-            else if (str_case_eq(fmt_str, "bsd"))
-            {
-                res.format = HASHMONKE_FILE_FORMAT_BSD;
-            }
-            else
+
+            if (!parse_format_string(fmt_str, &res.format))
             {
                 res.task = HASHMONKE_CLI_ERR;
                 res.err_msg = "Invalid format specified. Must be one of: auto, sfv, gnu, bsd.";
